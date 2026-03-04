@@ -52,6 +52,7 @@ To check that MCP servers are properly connected in a running Gemini session:
 
 ## Pane Dispatch Rules
 - **Never use raw `tmux send-keys`** — always use `dispatch_to_pane` MCP tool or `tmux-send-helper.sh`
+- **NEVER run `python3 urc/core/coordination_server.py` as a shell command** — it is an MCP server, not a CLI tool. Running it starts an infinite STDIO loop that hangs your shell. Use MCP tools or `tmux capture-pane -t %NNN -p -S -80` instead.
 - **Keep messages short** — under ~100 chars for wake-up nudges, under ~200 chars for instructions. Long messages with special characters can fail silently in the TUI input field.
 - **Check return status** — `delivered` = success, `queued` = retry with `force=true`, `uncertain` = retry shorter, `failed` = pane dead
 - **Verify after dispatch** — wait 5-10s, then `read_pane_output()` to confirm processing started

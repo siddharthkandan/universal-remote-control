@@ -970,6 +970,11 @@ def _run_self_test():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         _run_self_test()
+    elif len(sys.argv) > 1:
+        print(f"ERROR: Unknown argument '{sys.argv[1]}'. This is an MCP server, not a CLI tool.", file=sys.stderr)
+        print("Use MCP tools (dispatch_to_pane, read_pane_output, etc.) via your CLI's MCP integration.", file=sys.stderr)
+        print("For self-test: python3 coordination_server.py --self-test", file=sys.stderr)
+        sys.exit(1)
     else:
         _get_conn()
         mcp.run(transport="stdio")

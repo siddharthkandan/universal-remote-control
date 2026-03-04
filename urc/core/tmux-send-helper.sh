@@ -189,6 +189,10 @@ fi
 
 # ── Step 3: Determine CLI type for delay ──────────────────────────
 CLI_TYPE=$(resolve_cli_type "$PEER_NAME" 2>/dev/null || echo "unknown")
+if [ "$CLI_TYPE" = "unknown" ]; then
+    # Fallback: resolve by pane ID directly (uses DB cli field lookup)
+    CLI_TYPE=$(resolve_cli_type "$PANE" 2>/dev/null || echo "unknown")
+fi
 
 # ── Step 4: Capture before-state for verification ─────────────────
 BEFORE=""
@@ -199,13 +203,16 @@ fi
 # ── Step 5: Send text ─────────────────────────────────────────────
 TEXT_LEN=${#TEXT}
 USED_BUFFER_PASTE=0
-if [ "$TEXT_LEN" -gt "$LONG_MSG_THRESHOLD" ]; then
-    # Buffer paste for long messages
+if [ "$TEXT_LEN" -gt "$LONG_MSG_THRESHOLD" ] || [ "$CLI_TYPE" = "gemini" ]; then
+    # Buffer paste for long messages AND always for Gemini.
+    # Gemini CLI 0.32.x has a React state staleness bug where '!' in
+    # send-keys -l input triggers shell mode toggle. paste-buffer goes
+    # through Ink's paste handler, bypassing the '!' check entirely.
     USED_BUFFER_PASTE=1
     local_tmp=$(mktemp "${TMPDIR:-/tmp}/tmux-send-XXXXXX")
     printf '%s' "$TEXT" > "$local_tmp"
     tmux load-buffer -b urc-send "$local_tmp" 2>/dev/null
-    tmux paste-buffer -b urc-send -d -t "$PANE" 2>/dev/null
+    tmux paste-buffer -b urc-send -d -p -t "$PANE" 2>/dev/null
     rm -f "$local_tmp"
 else
     tmux send-keys -t "$PANE" -l "$TEXT" 2>/dev/null
@@ -247,8 +254,11 @@ else
             delay=$(awk "BEGIN { d = $CLAUDE_BASE_DELAY + $extra * 0.1; if (d > 2.0) d = 2.0; print d }")
             sleep "$delay"
             ;;
-        codex|gemini)
+        codex)
             sleep "$OTHER_BASE_DELAY"
+            ;;
+        gemini)
+            sleep 0.3
             ;;
         *)
             # Unknown CLI: use conservative delay to avoid Enter racing input.
@@ -262,7 +272,7 @@ fi
 # Enter. Claude Code renders input asynchronously; if Enter arrives
 # before the TUI finishes receiving characters, it is silently
 # swallowed. Poll up to 3s for the first 30 chars to appear.
-if [ "$USED_BUFFER_PASTE" -eq 0 ] && [ "$CLI_TYPE" = "claude" ] && [ "$VERIFY" = "yes" ]; then
+if [ "$USED_BUFFER_PASTE" -eq 0 ] && { [ "$CLI_TYPE" = "claude" ] || [ "$CLI_TYPE" = "gemini" ]; } && [ "$VERIFY" = "yes" ]; then
     _text_fingerprint="${TEXT:0:30}"
     _text_settled=0
     for _ts in 1 2 3 4 5 6; do
@@ -289,7 +299,7 @@ if [ "$VERIFY" = "no" ]; then
 fi
 
 # Processing markers that confirm the agent started working
-_PROCESSING_RE='tool use|running|processing|executing|thinking|working|generating|esc to interrupt'
+_PROCESSING_RE='tool use|running|processing|executing|thinking|working|generating|esc to interrupt|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|searching|calling|Interactive shell'
 
 # Wait 2s then check if content changed
 sleep 2
@@ -301,6 +311,12 @@ if [ "$BEFORE" != "$AFTER" ]; then
     if printf '%s' "$AFTER_LC" | grep -Eq "$_PROCESSING_RE"; then
         json_result "delivered" "$PANE"
         exit 0
+    fi
+    # Only retry aggressively for Claude — extra Enters interfere with Gemini/Codex tool execution
+    if [ "$CLI_TYPE" != "claude" ]; then
+        # Non-Claude: accept uncertain delivery after first check
+        json_result "uncertain" "$PANE" "content changed but no processing markers (non-Claude, skipping retries)"
+        exit 2
     fi
     # No markers — retry Enter up to 3 times (2s apart)
     for _ in 1 2 3; do
