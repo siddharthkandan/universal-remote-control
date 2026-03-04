@@ -123,7 +123,42 @@ Using the CLI Config Map above for the resolved CLI_TYPE:
   ```
   Where REGISTER_AS is `codex-cli` or `gemini-cli` per the config map.
 
-### 3. Launch the Haiku relay pane
+### 3. Check for orphaned relay
+
+Before spawning a new relay, check if an orphaned one already exists that we can re-pair.
+
+1. Call `get_fleet_status()` MCP tool to list all registered agents
+2. Find agents where `role` is `bridge` AND whose `label` contains CLI_TYPE (e.g. "CODEX" or "GEMINI")
+3. For each candidate relay pane (CANDIDATE_PANE):
+   a. Read its current bridge target:
+      ```bash
+      tmux show-options -pv -t CANDIDATE_PANE @bridge_target 2>/dev/null
+      ```
+      Store the result as OLD_TARGET.
+   b. Check if that target is still alive:
+      ```bash
+      tmux display-message -t OLD_TARGET -p '#{pane_id}' 2>&1
+      ```
+   c. If the target pane is dead (command fails or returns error) → this relay is orphaned. Store it as ORPHAN_RELAY and stop scanning.
+4. **If an orphaned relay was found** (ORPHAN_RELAY is set):
+   a. Re-pair it with the new target:
+      ```bash
+      tmux set-option -p -t ORPHAN_RELAY @bridge_target TARGET_PANE
+      tmux set-option -p -t TARGET_PANE @bridge_relay ORPHAN_RELAY
+      ```
+   b. Wake the relay so it picks up the new target:
+      ```bash
+      bash "$URC_ROOT/urc/core/tmux-send-helper.sh" ORPHAN_RELAY "__urc_refresh__" --force
+      ```
+   c. Display to the user:
+      ```
+      Re-paired existing relay ORPHAN_RELAY with new target TARGET_PANE (CLI_TYPE).
+      The relay is already visible in your Claude Code app.
+      ```
+   d. **Skip steps 4–7** — no new relay needed. Done.
+5. If no orphaned relay found → proceed to Step 4 to launch a new relay.
+
+### 4. Launch the Haiku relay pane
 
 Run this Bash command to create the relay pane in the same window as the target pane:
 ```
@@ -131,11 +166,11 @@ tmux split-window -v -d -P -F '#{pane_id}' -t TARGET_PANE "cd $URC_ROOT && sourc
 ```
 Store the output as RELAY_PANE.
 
-### 4. Wait for relay boot
+### 5. Wait for relay boot
 
 Wait 8 seconds for the Haiku relay to boot (Claude Code initialization).
 
-### 5. Bootstrap the relay
+### 6. Bootstrap the relay
 
 Send the bootstrap message to pair the relay with the target pane. Use TARGET_NUM = TARGET_PANE without the `%` prefix (e.g. if TARGET_PANE is `%875`, TARGET_NUM is `875`):
 ```
@@ -143,7 +178,7 @@ bash "$URC_ROOT/urc/core/tmux-send-helper.sh" RELAY_PANE "(TARGET_NUM) BOOTSTRAP
 ```
 Where BOOTSTRAP_TOKEN is `CODEX` or `GEMINI` per the config map.
 
-### 6. Confirm
+### 7. Confirm
 
 The bridge agent activates `/rc` itself as its last bootstrap step (background-scheduled, fires 3s after bootstrap turn ends). No need to send `/rc` externally.
 
