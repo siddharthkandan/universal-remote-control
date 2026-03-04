@@ -1,0 +1,28 @@
+{
+  "name": "universal-remote-control",
+  "owner": {
+    "name": "Siddharth Kandan"
+  },
+  "metadata": {
+    "description": "Control Codex and Gemini from your phone. Coordinate AI agents across CLIs."
+  },
+  "plugins": [
+    {
+      "name": "urc",
+      "source": {
+        "source": "github",
+        "repo": "siddharthkandan/universal-remote-control"
+      },
+      "description": "Control Codex and Gemini from your phone. Coordinate AI agents across CLIs via tmux.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Siddharth Kandan"
+      },
+      "homepage": "https://github.com/siddharthkandan/universal-remote-control#readme",
+      "repository": "https://github.com/siddharthkandan/universal-remote-control",
+      "license": "MIT",
+      "keywords": ["remote-control", "codex", "gemini", "tmux", "cross-cli", "teams", "relay"],
+      "category": "development-workflows"
+    }
+  ]
+}

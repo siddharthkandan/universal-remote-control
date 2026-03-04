@@ -1,0 +1,5 @@
+# URC — Python dependencies
+# Install: pip install -r requirements.txt
+mcp==1.26.0
+PyYAML==6.0.3
+anyio==4.12.1

@@ -1,0 +1,29 @@
+{
+  "name": "urc",
+  "version": "0.1.0",
+  "description": "Control Codex and Gemini from your phone. Coordinate AI agents across CLIs via tmux.",
+  "author": {
+    "name": "Siddharth Kandan"
+  },
+  "repository": "https://github.com/siddharthkandan/universal-remote-control",
+  "homepage": "https://github.com/siddharthkandan/universal-remote-control#readme",
+  "license": "MIT",
+  "keywords": ["remote-control", "codex", "gemini", "tmux", "cross-cli", "teams", "relay"],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": {
+    "urc-coordination": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/.venv/bin/python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/urc/core/coordination_server.py"],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PLUGIN_ROOT}"
+      }
+    },
+    "urc-teams": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/.venv/bin/python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/urc/core/teams_server.py"],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PLUGIN_ROOT}"
+      }
+    }
+  }
+}

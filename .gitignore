@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+*.cover
+.pytest_cache/
+
+# Runtime state (created by coordination server)
+.urc/
+
+# Generated CLI configs (created by setup.sh)
+.codex/
+.gemini/
+
+# Claude Code runtime (generated per-session)
+.claude/context-state*.json
+.claude/plan-pane*.md
+.claude/plan.md
+.claude/.agent-context-*
+.claude/handoff*.md
+
+# SQLite databases (runtime artifacts)
+*.db
+
+# OS / editor
+**/.DS_Store
+.env
+node_modules/

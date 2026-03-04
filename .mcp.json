@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "urc-coordination": {
+      "command": ".venv/bin/python3",
+      "args": ["urc/core/coordination_server.py"],
+      "env": {
+        "PYTHONPATH": "."
+      }
+    },
+    "urc-teams": {
+      "command": ".venv/bin/python3",
+      "args": ["urc/core/teams_server.py"],
+      "env": {
+        "PYTHONPATH": "."
+      }
+    }
+  }
+}
