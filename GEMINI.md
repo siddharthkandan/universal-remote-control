@@ -34,9 +34,21 @@ The RC Bridge makes this Gemini pane controllable from the Claude Code phone app
 | `claim_task` | Claim the highest-priority pending task for this agent |
 | `complete_task` | Mark a claimed task as completed (with optional commit SHA) |
 | `kill_pane` | Kill a tmux pane (requires explicit confirmation) |
+| `relay_forward` | Forward message to relay's bridge target (locked-down dispatch) |
+| `relay_read` | Read output from relay's bridge target (locked-down read) |
 
 ## Turn Completion
 The `AfterAgent` hook in `.gemini/settings.json` fires `turn-complete-hook.sh` after every turn. This writes a signal file at `.urc/signals/done_PANE`. Poll this file via Bash to detect turn completion.
+
+## Verifying MCP Connectivity
+
+To check that MCP servers are properly connected in a running Gemini session:
+
+- **`/mcp list`** — The correct way to verify MCP connectivity. Shows configured servers, connection state, discovered tools/prompts/resources, and per-server errors. This is the canonical MCP health check.
+- **`/mcp refresh`** — Restarts MCP servers and reloads tools without restarting Gemini. Use this after config changes.
+- **`/mcp desc`** or **`/mcp schema`** — Deeper validation of tool descriptions and schemas.
+- **Do NOT use `/tools`** to check MCP status. The `/tools` command intentionally filters out MCP tools (`serverName` tools are excluded), so it will show zero MCP tools even when servers are connected and working.
+- **Out-of-session check:** `gemini mcp list` runs an active connection test (connect + ping with 5s timeout) and reports Connected/Disconnected per server.
 
 ## Pane Dispatch Rules
 - **Never use raw `tmux send-keys`** — always use `dispatch_to_pane` MCP tool or `tmux-send-helper.sh`
@@ -66,8 +78,12 @@ Recipient retrieves with `mcp__urc_coordination__receive_messages(pane_id="%TARG
   - Then dispatch: `"Read .urc/handoff-896-to-906.md for full context"`
   Long messages (3000+ chars) may be silently truncated by tmux paste buffers, even when `dispatch_to_pane` reports "delivered".
 
-**Read what another pane is showing:**
+**Read what another pane is showing (MCP preferred, shell fallback):**
 `mcp__urc_coordination__read_pane_output(pane_id="%NNN", lines=30)`
+MCP tools are the primary method for all pane communication. The shell fallback below is only for edge cases where MCP servers are unavailable (e.g., server crash, startup race):
+```bash
+tmux capture-pane -t %NNN -p -S -80
+```
 
 **Teams protocol (structured cross-CLI collaboration):**
 `mcp__urc_teams__team_send`, `mcp__urc_teams__team_inbox`, `mcp__urc_teams__team_broadcast` — see `urc/core/teams_server.py`.
@@ -84,14 +100,17 @@ When you dispatch work to another pane, you MUST poll for their completion — d
    ELAPSED=0; while [ ! -f .urc/signals/done_%NNN ] && [ $ELAPSED -lt 300 ]; do sleep 3; ELAPSED=$((ELAPSED + 3)); done
    [ -f .urc/signals/done_%NNN ] && echo "DONE" || echo "TIMEOUT"
    ```
-4. **Read** output: `read_pane_output(pane_id="%NNN", lines=80)` — do this even on TIMEOUT
+4. **Read** output (MCP or shell — use whichever works):
+   - MCP: `mcp__urc_coordination__read_pane_output(pane_id="%NNN", lines=80)`
+   - Shell: `tmux capture-pane -t %NNN -p -S -80`
+   Do this even on TIMEOUT.
 
 **Why:** Without polling, you go silent after dispatch and the user must manually prompt you to check results. Timeout is not fatal — some CLIs may not have hooks configured. Always read output regardless.
 
 ## Key Files
 | Component | File |
 |-----------|------|
-| Coordination server (13 MCP tools) | `urc/core/coordination_server.py` |
+| Coordination server (15 MCP tools) | `urc/core/coordination_server.py` |
 | Teams MCP server (17 MCP tools) | `urc/core/teams_server.py` |
 | Pane communication | `urc/core/tmux-send-helper.sh` |
 | Turn completion hook | `urc/core/turn-complete-hook.sh` |

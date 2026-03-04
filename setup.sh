@@ -317,18 +317,16 @@ if [[ $HAS_GEMINI -eq 1 ]]; then
   "experimental": {
     "enableAgents": true
   },
-  "tools": {
-    "mcpServers": {
-      "urc_coordination": {
-        "command": ".venv/bin/python3",
-        "args": ["urc/core/coordination_server.py"],
-        "env": { "PYTHONPATH": "." }
-      },
-      "urc_teams": {
-        "command": ".venv/bin/python3",
-        "args": ["urc/core/teams_server.py"],
-        "env": { "PYTHONPATH": "." }
-      }
+  "mcpServers": {
+    "urc_coordination": {
+      "command": ".venv/bin/python3",
+      "args": ["urc/core/coordination_server.py"],
+      "env": { "PYTHONPATH": "." }
+    },
+    "urc_teams": {
+      "command": ".venv/bin/python3",
+      "args": ["urc/core/teams_server.py"],
+      "env": { "PYTHONPATH": "." }
     }
   },
   "hooks": {
