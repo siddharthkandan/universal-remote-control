@@ -30,33 +30,9 @@ Codex or Gemini pane (tmux)
 
 ### Demo
 
-Here's what a phone-to-Codex session looks like through URC:
+One prompt from the Claude App — orchestrating Codex and Gemini, with their responses streaming back into the Claude App in real time:
 
-```
-┌─────────────────────────────────────────────────┐
-│  Claude app (phone)                             │
-│                                                 │
-│  You: List all API endpoints in src/routes/     │
-│       and tell me which ones are missing         │
-│       input validation                          │
-│                                                 │
-│  ── relay dispatches to Codex ──                │
-│                                                 │
-│  Codex: Found 14 endpoints in src/routes/.      │
-│  Missing input validation:                      │
-│    • POST /users    (src/routes/users.ts:34)    │
-│    • POST /orders   (src/routes/orders.ts:71)   │
-│    • PUT  /settings (src/routes/settings.ts:22) │
-│                                                 │
-│  You: Add zod validation to POST /users.        │
-│       Use the same pattern as POST /teams.      │
-│                                                 │
-│  Codex: Done. Added zod schema, validated       │
-│  request body. Tests passing (14/14). Committed.│
-│                                                 │
-│  Total time: ~45 seconds                        │
-└─────────────────────────────────────────────────┘
-```
+![URC Demo — orchestrating Codex and Gemini from the Claude App](docs/demo.gif)
 
 ## Install
 
