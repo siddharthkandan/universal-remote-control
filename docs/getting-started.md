@@ -131,3 +131,4 @@ Claude Code auto-starts both from `.mcp.json`. Codex and Gemini configs are in
 | Turn completion not detected | Check hook config: `.codex/config.toml` (notify) or `.gemini/settings.json` (AfterAgent) |
 | RC disconnects | Re-run `/remote-control` in the relay pane for a new session |
 | MCP server won't start | Run `./setup.sh` again, verify `.venv/bin/python3` works |
+| Gemini MCP tools missing | Run `gemini mcp list` to check server connection. If connected but tools hidden: check `~/.gemini/policies/urc-mcp.toml` exists (re-run `./setup.sh`). Remove any `tools.allowed` whitelist from `~/.gemini/settings.json`. Note: `/tools` hides MCP tools by design — use `/mcp list` instead. |

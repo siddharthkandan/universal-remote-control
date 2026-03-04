@@ -101,6 +101,16 @@ Once approved by Anthropic:
 /install urc
 ```
 
+### Gemini Setup Note
+
+Gemini CLI requires additional configuration beyond what `setup.sh` generates:
+
+- **Project config**: `mcpServers` must be at the **top level** in `.gemini/settings.json` (NOT nested under `"tools"`) — `setup.sh` handles this correctly
+- **Global config**: If `~/.gemini/settings.json` has a `tools.allowed` whitelist, it blocks MCP tools not in the list — remove the `"tools"` block or add URC tools
+- **Policy engine**: `~/.gemini/policies/` needs allow rules for all 32 URC MCP tools — `setup.sh` auto-creates these at `~/.gemini/policies/urc-mcp.toml`
+- **Verify**: Run `gemini mcp list` (out of session) or `/mcp list` (in session) to confirm tools are visible
+- **Note**: Gemini's `/tools` command intentionally hides MCP tools — don't use it to check MCP status
+
 ### Quick Start
 
 From Claude Code:
