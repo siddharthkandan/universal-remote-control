@@ -56,7 +56,8 @@ except: print('')
     if [ -n "$_ds_status" ]; then
       # Map SQLite status → observer.sh state names
       case "$_ds_status" in
-        active|processing) echo "PROCESSING" ; return ;;
+        active)            echo "IDLE"        ; return ;;
+        processing)        echo "PROCESSING" ; return ;;
         idle)              echo "IDLE"        ; return ;;
         thinking)          echo "PROCESSING"  ; return ;;
         stuck)             echo "STUCK_INPUT" ; return ;;

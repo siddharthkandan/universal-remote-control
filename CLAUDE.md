@@ -17,7 +17,7 @@
 - **Never `claude --plugin-dir .` from inside Claude Code** — the `CLAUDECODE` env var blocks nested sessions. Use the validation script instead.
 
 ## Architecture
-- Coordination server: `urc/core/coordination_server.py` (13 MCP tools)
+- Coordination server: `urc/core/coordination_server.py` (15 MCP tools)
 - Teams protocol: `urc/core/teams_protocol.py` (cross-CLI messaging)
 - Teams MCP server: `urc/core/teams_server.py` (17 MCP tools)
 - RC Bridge agent: `.claude/agents/rc-bridge.md` (Haiku passthrough)
@@ -41,7 +41,7 @@ See [AGENTS.md](AGENTS.md#cross-pane-communication) for the full cross-pane prot
 ## Key Files
 | Component | File |
 |-----------|------|
-| Coordination server (13 tools) | `urc/core/coordination_server.py` |
+| Coordination server (15 tools) | `urc/core/coordination_server.py` |
 | Teams protocol (data layer) | `urc/core/teams_protocol.py` |
 | Teams MCP server (17 tools) | `urc/core/teams_server.py` |
 | SQLite foundation | `urc/core/coordination_db.py` |

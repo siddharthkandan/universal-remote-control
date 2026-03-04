@@ -31,6 +31,8 @@ Launch with: `/rc-bridge`
 | `claim_task` | Claim the highest-priority pending task for this agent |
 | `complete_task` | Mark a claimed task as completed (with optional commit SHA) |
 | `kill_pane` | Kill a tmux pane (requires explicit confirmation) |
+| `relay_forward` | Forward message to relay's bridge target (locked-down dispatch) |
+| `relay_read` | Read output from relay's bridge target (locked-down read) |
 
 ### urc-teams (cross-CLI messaging)
 Team creation, membership, task management, and typed messaging between CLI agents. See `urc/core/teams_server.py` for full tool list.
@@ -91,7 +93,7 @@ When you dispatch work to another pane, you MUST poll for their completion — d
 
 | Component | File |
 |-----------|------|
-| Coordination server (13 MCP tools) | `urc/core/coordination_server.py` |
+| Coordination server (15 MCP tools) | `urc/core/coordination_server.py` |
 | Teams server (17 MCP tools) | `urc/core/teams_server.py` |
 | Pane communication | `urc/core/tmux-send-helper.sh` |
 | Turn completion hook | `urc/core/turn-complete-hook.sh` |

@@ -5,9 +5,9 @@ coordination_server.py — MCP server for URC state coordination.
 Wraps coordination_db and jsonl_recovery as MCP tools over STDIO transport.
 Agents register, send heartbeats, and query health via this server.
 
-13 tools: register_agent, heartbeat, health_check, claim_task, complete_task,
+15 tools: register_agent, heartbeat, health_check, claim_task, complete_task,
 send_message, receive_messages, get_fleet_status, report_event, rename_agent,
-dispatch_to_pane, read_pane_output, kill_pane.
+dispatch_to_pane, read_pane_output, kill_pane, relay_forward, relay_read.
 
 Usage (normal):
     python3 urc/core/coordination_server.py
@@ -153,6 +153,24 @@ def _send_to_pane(pane_id: str, message: str, force: bool = False) -> dict:
         resp["status"] = "uncertain"
         resp["warning"] = warning
     return resp
+
+
+def _get_bridge_target(my_pane: str) -> Optional[str]:
+    """Read @bridge_target tmux pane option for a relay pane.
+
+    Returns the target pane ID (e.g. '%856') or None if not set.
+    """
+    try:
+        result = subprocess.run(
+            ["tmux", "show-options", "-pv", "-t", my_pane, "@bridge_target"],
+            capture_output=True, text=True, timeout=5,
+        )
+        target = result.stdout.strip()
+        if target and target.startswith("%"):
+            return target
+        return None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -673,12 +691,122 @@ def kill_pane(pane_id: str, confirm: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tool 14: relay_forward
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def relay_forward(my_pane: str, message: str, force: bool = False) -> dict:
+    """Forward a message to this relay's bridge target pane.
+
+    Reads @bridge_target from tmux pane options for my_pane, then dispatches
+    to that target. The relay never chooses the target — it is structurally
+    locked to the pane set during bootstrap.
+
+    If the first dispatch returns 'queued' (target is PROCESSING), automatically
+    retries with force=true.
+
+    Args:
+        my_pane: Tmux pane ID of the relay (e.g. "%860"). Used to look up
+                 the bridge target from pane options.
+        message: The message to forward verbatim to the target pane.
+        force:   When True, bypass PROCESSING check on first attempt.
+    """
+    _ensure_registered()
+    try:
+        target = _get_bridge_target(my_pane)
+        if not target:
+            return {"error": "no @bridge_target set for pane", "tool": "relay_forward"}
+
+        result = _send_to_pane(target, message, force=force)
+
+        # Auto-retry with force if target was PROCESSING
+        if result.get("status") == "queued" and not force:
+            result = _send_to_pane(target, message, force=True)
+            result["auto_forced"] = True
+
+        # JSONL audit for successful dispatches
+        status = result.get("status", "")
+        if status in ("delivered", "uncertain"):
+            from urc.core.jsonl_recovery import append_log
+            log_data: dict = {
+                "relay": my_pane,
+                "target": target,
+                "message": message[:200],
+            }
+            if result.get("warning"):
+                log_data["warning"] = result["warning"]
+            if result.get("auto_forced"):
+                log_data["auto_forced"] = True
+            append_log("relay_forward", my_pane, log_data)
+
+        result["target"] = target
+        return result
+
+    except Exception as e:
+        return {"status": "failed", "error": str(e), "tool": "relay_forward"}
+
+
+# ---------------------------------------------------------------------------
+# Tool 15: relay_read
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def relay_read(my_pane: str, lines: int = 100) -> dict:
+    """Read recent output from this relay's bridge target pane.
+
+    Reads @bridge_target from tmux pane options for my_pane, then captures
+    the target pane's buffer. The relay never chooses which pane to read —
+    it is structurally locked.
+
+    Args:
+        my_pane: Tmux pane ID of the relay (e.g. "%860").
+        lines:   Number of lines to capture from the bottom (default 100, max 200).
+    """
+    try:
+        target = _get_bridge_target(my_pane)
+        if not target:
+            return {"error": "no @bridge_target set for pane", "tool": "relay_read"}
+
+        n = min(max(lines, 1), 200)
+
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", target, "-p", "-S", f"-{n}"],
+            capture_output=True, text=True, timeout=10,
+        )
+
+        if result.returncode != 0:
+            return {
+                "error": f"capture-pane failed: {result.stderr.strip()[:200]}",
+                "tool": "relay_read",
+            }
+
+        output = result.stdout
+        output_lines = output.split("\n")
+        while output_lines and not output_lines[0].strip():
+            output_lines.pop(0)
+        output = "\n".join(output_lines)
+
+        return {
+            "target": target,
+            "output": output,
+            "line_count": len(output_lines),
+        }
+
+    except subprocess.TimeoutExpired:
+        return {"error": "capture-pane timed out (10s)", "tool": "relay_read"}
+    except Exception as e:
+        return {"error": str(e), "tool": "relay_read"}
+
+
+# ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------
 
 
 def _run_self_test():
-    """Exercise all 13 tools via direct function calls against in-memory DB."""
+    """Exercise all 15 tools via direct function calls against in-memory DB."""
     import tempfile
     from urc.core.coordination_db import (
         get_connection, init_schema, get_agent, create_task,
@@ -814,7 +942,23 @@ def _run_self_test():
         assert kp_result.get("status") == "confirmation_required"
         assert "warning" in kp_result
 
-    print("PASS: coordination_server self-test (13 tools)")
+        # ── Tool 14: relay_forward (no bridge target) ────────────────
+        rf_result = relay_forward(my_pane="%nonexistent_relay", message="hello")
+        assert isinstance(rf_result, dict), "relay_forward returned non-dict"
+        assert rf_result.get("error") == "no @bridge_target set for pane", (
+            f"Expected bridge_target error, got: {rf_result}"
+        )
+        assert rf_result.get("tool") == "relay_forward"
+
+        # ── Tool 15: relay_read (no bridge target) ───────────────────
+        rr_result = relay_read(my_pane="%nonexistent_relay", lines=10)
+        assert isinstance(rr_result, dict), "relay_read returned non-dict"
+        assert rr_result.get("error") == "no @bridge_target set for pane", (
+            f"Expected bridge_target error, got: {rr_result}"
+        )
+        assert rr_result.get("tool") == "relay_read"
+
+    print("PASS: coordination_server self-test (15 tools)")
     sys.exit(0)
 
 
