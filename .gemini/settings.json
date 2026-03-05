@@ -1,0 +1,43 @@
+{
+  "experimental": {
+    "enableAgents": true
+  },
+  "mcpServers": {
+    "urc_coordination": {
+      "command": ".venv/bin/python3",
+      "args": ["urc/core/coordination_server.py"],
+      "env": { "PYTHONPATH": "." }
+    },
+    "urc_teams": {
+      "command": ".venv/bin/python3",
+      "args": ["urc/core/teams_server.py"],
+      "env": { "PYTHONPATH": "." }
+    }
+  },
+  "hooks": {
+    "BeforeAgent": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "inbox-inject",
+            "type": "command",
+            "command": "bash /Users/sidkandan/Documents/ClaudeAssistant/UniversalRemoteControl/.gemini/hooks/inbox-inject.sh"
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "turn-signal",
+            "type": "command",
+            "command": "bash /Users/sidkandan/Documents/ClaudeAssistant/UniversalRemoteControl/urc/core/turn-complete-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

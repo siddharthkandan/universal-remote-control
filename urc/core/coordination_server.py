@@ -5,10 +5,10 @@ coordination_server.py — MCP server for URC state coordination.
 Wraps coordination_db and jsonl_recovery as MCP tools over STDIO transport.
 Agents register, send heartbeats, and query health via this server.
 
-16 tools: register_agent, heartbeat, health_check, claim_task, complete_task,
-send_message, receive_messages, get_fleet_status, report_event, rename_agent,
-dispatch_to_pane, read_pane_output, kill_pane, relay_forward, relay_read,
-bootstrap_validate.
+18 tools: register_agent, heartbeat, health_check, claim_task, complete_task,
+send_message, send_with_notify, receive_messages, get_fleet_status,
+report_event, rename_agent, dispatch_to_pane, read_pane_output, kill_pane,
+relay_forward, relay_read, cancel_dispatch, bootstrap_validate.
 
 Usage (normal):
     python3 urc/core/coordination_server.py
@@ -93,6 +93,26 @@ def _get_conn():
 # ---------------------------------------------------------------------------
 
 _HELPER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmux-send-helper.sh")
+
+
+def _peek_inbox_hint() -> Optional[str]:
+    """O(1) check for unread inbox messages for this pane. Returns hint string or None."""
+    pane_id = _server_pane
+    if not pane_id:
+        return None
+    signal = os.path.join(_project_root, ".urc", "inbox", f"{pane_id}.signal")
+    if not os.path.exists(signal):
+        return None
+    try:
+        from urc.core.coordination_db import receive_messages as db_recv
+        conn = _get_conn()
+        msgs = db_recv(conn, pane_id, mark_read=False)
+        count = len(msgs) if msgs else 0
+        if count == 0:
+            return None
+        return f"You have {count} unread message(s). Call receive_messages(\"{pane_id}\") to read."
+    except Exception:
+        return None
 
 
 def _pane_exists(pane_id: str) -> bool:
@@ -238,7 +258,11 @@ def heartbeat(
         update_heartbeat(conn, pane_id, context_pct, status)
         append_log("heartbeat", pane_id, {"context_pct": context_pct, "status": status})
 
-        return {"status": "ok", "pane_id": pane_id}
+        result = {"status": "ok", "pane_id": pane_id}
+        hint = _peek_inbox_hint()
+        if hint:
+            result["inbox_hint"] = hint
+        return result
 
     except Exception as e:
         return {"error": str(e), "tool": "heartbeat"}
@@ -359,6 +383,16 @@ def send_message(from_pane: str, body: str, to_pane: Optional[str] = None) -> di
         conn = _get_conn()
         msg_id = db_send_message(conn, from_pane, to_pane, body)
         append_log("send_message", from_pane, {"to_pane": to_pane, "body": body})
+
+        # Touch inbox signal for PostToolUse piggyback detection
+        if to_pane:
+            try:
+                inbox_dir = os.path.join(_project_root, ".urc", "inbox")
+                os.makedirs(inbox_dir, exist_ok=True)
+                with open(os.path.join(inbox_dir, f"{to_pane}.signal"), "w") as f:
+                    f.write(f"{from_pane}\n")
+            except OSError:
+                pass
 
         # Best-effort tmux wake signal to nudge idle recipient
         wake_status = None
@@ -518,7 +552,11 @@ def get_fleet_status() -> dict:
                 "label": r.get("label", ""),
             })
 
-        return {"agents": agents}
+        result = {"agents": agents}
+        hint = _peek_inbox_hint()
+        if hint:
+            result["inbox_hint"] = hint
+        return result
 
     except Exception as e:
         return {"error": str(e), "tool": "get_fleet_status"}
@@ -639,6 +677,9 @@ def dispatch_to_pane(pane_id: str, message: str, force: bool = False) -> dict:
                 log_data["warning"] = result["warning"]
             append_log("dispatch_to_pane", pane_id, log_data)
 
+        hint = _peek_inbox_hint()
+        if hint:
+            result["inbox_hint"] = hint
         return result
 
     except Exception as e:
@@ -685,11 +726,15 @@ def read_pane_output(pane_id: str, lines: int = 30) -> dict:
             output_lines.pop(0)
         output = "\n".join(output_lines)
 
-        return {
+        result = {
             "pane_id": pane_id,
             "output": output,
             "line_count": len(output_lines),
         }
+        hint = _peek_inbox_hint()
+        if hint:
+            result["inbox_hint"] = hint
+        return result
 
     except subprocess.TimeoutExpired:
         return {"error": "capture-pane timed out (10s)", "tool": "read_pane_output"}
@@ -859,6 +904,46 @@ def relay_read(my_pane: str, lines: int = 100) -> dict:
 
 
 @mcp.tool()
+def cancel_dispatch(pane_id: str) -> dict:
+    """Cancel an in-progress dispatch to a target pane.
+
+    Sends SIGINT via tmux to the target, clears signal/response files,
+    and signals the tmux wait-for channel to unblock any waiting dispatcher.
+
+    Args:
+        pane_id: Target pane ID to cancel (e.g. "%391").
+    """
+    try:
+        # Send Ctrl-C to target pane
+        subprocess.run(
+            ["tmux", "send-keys", "-t", pane_id, "C-c"],
+            capture_output=True, timeout=5,
+        )
+
+        # Clear signal and response files
+        signal_file = os.path.join(_project_root, ".urc", "signals", f"done_{pane_id}")
+        response_file = os.path.join(_project_root, ".urc", "responses", f"{pane_id}.json")
+        for f in [signal_file, response_file]:
+            try:
+                os.unlink(f)
+            except FileNotFoundError:
+                pass
+
+        # Signal the wait-for channel to unblock any waiting dispatcher
+        subprocess.run(
+            ["tmux", "wait-for", "-S", f"urc_done_{pane_id}"],
+            capture_output=True, timeout=3,
+        )
+
+        return {"status": "cancelled", "pane_id": pane_id}
+
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "pane_id": pane_id, "error": "tmux command timed out"}
+    except Exception as e:
+        return {"error": str(e), "tool": "cancel_dispatch"}
+
+
+@mcp.tool()
 def bootstrap_validate() -> dict:
     """Validate URC setup: CWD, directories, hook configs, tmux, MCP servers.
     Call this before any cross-CLI operation to catch setup issues early.
@@ -906,7 +991,7 @@ def bootstrap_validate() -> dict:
 
 
 def _run_self_test():
-    """Exercise all 16 tools via direct function calls against in-memory DB."""
+    """Exercise all 18 tools via direct function calls against in-memory DB."""
     import tempfile
     from urc.core.coordination_db import (
         get_connection, init_schema, get_agent, create_task,
@@ -1058,13 +1143,22 @@ def _run_self_test():
         )
         assert rr_result.get("tool") == "relay_read"
 
-        # ── Tool 16: bootstrap_validate ──────────────────────────────
+        # ── Tool 16: send_with_notify ────────────────────────────────
+        swn_result = send_with_notify(from_pane="%test", to_pane="%other", body="Notify test")
+        assert swn_result.get("status") == "sent", f"send_with_notify failed: {swn_result}"
+        assert swn_result.get("notified") is True
+
+        # ── Tool 17: cancel_dispatch ─────────────────────────────────
+        cd_result = cancel_dispatch(pane_id="%nonexistent_test_pane")
+        assert isinstance(cd_result, dict), "cancel_dispatch returned non-dict"
+
+        # ── Tool 18: bootstrap_validate ──────────────────────────────
         bv_result = bootstrap_validate()
         assert isinstance(bv_result, dict), "bootstrap_validate returned non-dict"
         assert "valid" in bv_result, f"bootstrap_validate missing 'valid' key: {bv_result}"
         assert "project_root" in bv_result
 
-    print("PASS: coordination_server self-test (16 tools)")
+    print("PASS: coordination_server self-test (18 tools)")
     sys.exit(0)
 
 
