@@ -379,6 +379,63 @@ def send_message(from_pane: str, body: str, to_pane: Optional[str] = None) -> di
         return {"error": str(e), "tool": "send_message"}
 
 
+@mcp.tool()
+def send_with_notify(from_pane: str, to_pane: str, body: str) -> dict:
+    """Send a message and notify the recipient via inbox signal + tmux wake.
+
+    Atomically: commits message to SQLite -> touches .urc/inbox/{to_pane}.signal
+    -> fires tmux wait-for "urc_inbox_{to_pane}" -> sends wake nudge.
+    Recipient's PostToolUse hook (inbox-piggyback.sh) checks the signal file.
+
+    Args:
+        from_pane: Sender pane ID.
+        to_pane:   Recipient pane ID.
+        body:      Message body text.
+    """
+    _ensure_registered()
+    try:
+        from urc.core.coordination_db import send_message as db_send_message
+        from urc.core.jsonl_recovery import append_log
+
+        conn = _get_conn()
+        msg_id = db_send_message(conn, from_pane, to_pane, body)
+        append_log("send_with_notify", from_pane, {"to_pane": to_pane, "body": body})
+
+        # Touch inbox signal file for O(1) stat check by PostToolUse hook
+        inbox_dir = os.path.join(_project_root, ".urc", "inbox")
+        os.makedirs(inbox_dir, exist_ok=True)
+        signal_path = os.path.join(inbox_dir, f"{to_pane}.signal")
+        with open(signal_path, "w") as f:
+            f.write(f"{from_pane}\n")
+
+        # Fire tmux wait-for for instant inbox notification
+        try:
+            subprocess.run(
+                ["tmux", "wait-for", "-S", f"urc_inbox_{to_pane}"],
+                capture_output=True, timeout=3,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # Best-effort wake nudge via tmux send-keys
+        wake_status = None
+        if to_pane != from_pane and _server_pane:
+            try:
+                nudge = f"You have an unread message from {from_pane}. Use receive_messages to read it."
+                result = subprocess.run(
+                    ["bash", _HELPER_PATH, to_pane, nudge, "--force", "--verify"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                wake_status = "nudged" if result.returncode == 0 else "failed"
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                wake_status = "failed"
+
+        return {"status": "sent", "message_id": msg_id, "notified": True, "wake": wake_status}
+
+    except Exception as e:
+        return {"error": str(e), "tool": "send_with_notify"}
+
+
 # ---------------------------------------------------------------------------
 # Tool 7: receive_messages
 # ---------------------------------------------------------------------------
