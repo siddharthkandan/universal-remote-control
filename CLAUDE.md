@@ -21,7 +21,8 @@
 - Teams protocol: `urc/core/teams_protocol.py` (cross-CLI messaging)
 - Teams MCP server: `urc/core/teams_server.py` (17 MCP tools)
 - RC Bridge agent: `.claude/agents/rc-bridge.md` (Haiku passthrough via dispatch-and-wait.sh)
-- RC Bridge skill: `.claude/skills/rc-bridge/SKILL.md` (universal launcher)
+- URC Spawn script: `urc/core/urc-spawn.sh` (fire-and-forget bash spawner, ~20s)
+- RC Bridge skill: `.claude/skills/rc-any/SKILL.md` (thin dispatcher → runs urc-spawn.sh in background)
 - CLI detection: `urc/core/lib-cli.sh` (3-CLI field mapping)
 - Dispatch composite: `urc/core/dispatch-and-wait.sh` (atomic dispatch + wait + read)
 - Response schema: `urc/schemas/response.md`
@@ -61,7 +62,8 @@ See [AGENTS.md](AGENTS.md#cross-pane-communication) for the full cross-pane prot
 | Turn completion hook | `urc/core/turn-complete-hook.sh` |
 | Response file schema | `urc/schemas/response.md` |
 | RC Bridge agent | `.claude/agents/rc-bridge.md` |
-| RC Bridge skill (universal) | `.claude/skills/rc-bridge/SKILL.md` |
+| URC Spawn script (fire-and-forget) | `urc/core/urc-spawn.sh` |
+| RC Bridge skill (thin dispatcher) | `.claude/skills/rc-any/SKILL.md` |
 | Inbox piggyback (Claude) | `.claude/hooks/inbox-piggyback.sh` |
 | Inbox inject (Gemini) | `.gemini/hooks/inbox-inject.sh` |
 | Plugin manifest | `.claude-plugin/plugin.json` |
@@ -70,4 +72,5 @@ See [AGENTS.md](AGENTS.md#cross-pane-communication) for the full cross-pane prot
 | Codex RC skill | `.agents/skills/rc-bridge/SKILL.md` |
 | Codex instructions | `AGENTS.md` |
 | Gemini instructions | `GEMINI.md` |
+| URC quick launcher (! mode) | `urc.sh` |
 | MCP config | `.mcp.json` |
