@@ -1,6 +1,17 @@
 {
-  "description": "URC turn-completion and auto-setup hooks",
+  "description": "URC turn-completion, auto-setup, and command intercept hooks",
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/urc-intercept.sh"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",

@@ -43,10 +43,8 @@ First turn receives bootstrap message like: `(856) CODEX`
 5. Call `rename_agent(pane_id=MY_PANE, label="(856) CODEX")`
 6. Read current state: `bash "$CLAUDE_PROJECT_DIR"/urc/core/dispatch-and-wait.sh "%856" "" 5 --skip-dispatch 2>/dev/null || echo '{"status":"no_response"}'`
 7. Display: `Bridge ready. Target: TARGET_PANE (CLI_TYPE)`
-8. Activate Remote Control:
-   ```bash
-   (sleep 3 && tmux send-keys -t $TMUX_PANE -l "/remote-control" && sleep 1 && tmux send-keys -t $TMUX_PANE Enter) &
-   ```
+
+Note: `/remote-control` activation is handled by `urc-spawn.sh` externally. Do NOT send it yourself.
 
 ## Message Loop
 
@@ -68,11 +66,11 @@ First turn receives bootstrap message like: `(856) CODEX`
 2. Display output verbatim in a code block, or `(no new output)` if empty.
 
 **All other messages** — the normal relay cycle:
-1. Dispatch and wait (ONE Bash call does everything):
+1. Dispatch and wait — **CRITICAL: This MUST be a FOREGROUND Bash call. Do NOT use run_in_background. Do NOT background it. The Bash tool will block until the command exits and return all output. This is correct and expected.**
    ```bash
    bash "$CLAUDE_PROJECT_DIR"/urc/core/dispatch-and-wait.sh "$TARGET_PANE" "$USER_MESSAGE_VERBATIM" 120
    ```
-   This atomically: clears signals → dispatches → waits for completion → reads response.
+   This atomically: clears signals → dispatches → waits for completion → reads response. It blocks for as long as the target CLI takes to respond. THIS IS NORMAL. Do NOT try to optimize by backgrounding.
 2. Parse the JSON output. Display `response_text` VERBATIM in a code block.
    - If `status` is `dispatch_failed` → verify target: `tmux display-message -t $TARGET_PANE -p '#{pane_id}' 2>&1`
      - Dead → display `TARGET DEAD: TARGET_PANE is gone. Type "reconnect %ID" with a new pane.`
@@ -83,7 +81,7 @@ First turn receives bootstrap message like: `(856) CODEX`
    ```bash
    RELAYS=$((RELAY_COUNT + 1))
    tmux set-option -p -t $TMUX_PANE @bridge_relays $RELAYS
-   if [ $RELAYS -ge 2 ]; then (sleep 5 && tmux send-keys -t $TMUX_PANE -l "/clear" && sleep 1 && tmux send-keys -t $TMUX_PANE Enter) & fi
+   if [ $RELAYS -ge 8 ]; then (sleep 5 && tmux send-keys -t $TMUX_PANE -l "/clear" && sleep 1 && tmux send-keys -t $TMUX_PANE Enter) & fi
    ```
 
 ## Rules

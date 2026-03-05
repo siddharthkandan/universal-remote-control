@@ -76,10 +76,9 @@ log() { echo "[urc-spawn] $*" >&2; }
 if [ "$MODE" = "spawn" ]; then
   log "Spawning $CLI_TYPE pane..."
   SPLIT_TARGET="${CALLER_PANE:-${TMUX_PANE:-urc}}"
-  TARGET_PANE=$(tmux split-window -h -d -P -F '#{pane_id}' -t "$SPLIT_TARGET")
+  TARGET_PANE=$(tmux split-window -h -d -P -F '#{pane_id}' -t "$SPLIT_TARGET" \
+    "cd '$URC_ROOT' && $LAUNCH_CMD; EC=\$?; [ \$EC -ne 0 ] && echo \"\$(date '+%H:%M:%S') $CLI_TYPE crashed (exit \$EC)\" >> '$URC_ROOT/.urc/crashes.log' && tmux display-message \"$CLI_TYPE crashed (exit \$EC)\" && sleep 10")
   log "CLI pane: $TARGET_PANE"
-  sleep 1
-  tmux send-keys -t "$TARGET_PANE" "cd $URC_ROOT && $LAUNCH_CMD" Enter
   sleep 5
   db_register "$TARGET_PANE" "$REGISTER_AS" "engineer"
   log "Registered $TARGET_PANE as $REGISTER_AS"
@@ -137,15 +136,14 @@ fi
 # Step 3: Spawn relay pane
 # ============================================================
 log "Spawning relay pane..."
-RELAY_PANE=$(tmux split-window -v -d -P -F '#{pane_id}' -t "$TARGET_PANE")
+RELAY_PANE=$(tmux split-window -v -d -P -F '#{pane_id}' -t "$TARGET_PANE" \
+  "cd '$URC_ROOT' && source .venv/bin/activate && claude --agent rc-bridge --model haiku --dangerously-skip-permissions; EC=\$?; [ \$EC -ne 0 ] && echo \"\$(date '+%H:%M:%S') Relay crashed (exit \$EC)\" >> '$URC_ROOT/.urc/crashes.log' && tmux display-message \"RC Bridge relay crashed (exit \$EC)\" && sleep 10")
 log "Relay pane: $RELAY_PANE"
-sleep 1
-tmux send-keys -t "$RELAY_PANE" "cd $URC_ROOT && source .venv/bin/activate && claude --agent rc-bridge --model haiku --dangerously-skip-permissions" Enter
 
 # ============================================================
 # Step 4: Wait for relay boot + verify + bootstrap
 # ============================================================
-log "Waiting 10s for relay boot..."
+log "Waiting for relay boot..."
 sleep 10
 
 if ! tmux display-message -t "$RELAY_PANE" -p '#{pane_id}' >/dev/null 2>&1; then
@@ -160,8 +158,7 @@ TARGET_NUM="${TARGET_PANE#%}"
 log "Bootstrapping relay: ($TARGET_NUM) $CLI_TYPE"
 bash "$URC_ROOT/urc/core/tmux-send-helper.sh" "$RELAY_PANE" "($TARGET_NUM) $CLI_TYPE" --force >/dev/null 2>&1
 
-# Activate /remote-control after bootstrap completes (Haiku sometimes
-# prints this instead of executing it, so we do it from here reliably)
+# Activate /remote-control after bootstrap completes
 (sleep 8 && bash "$URC_ROOT/urc/core/tmux-send-helper.sh" "$RELAY_PANE" "/remote-control" --force >/dev/null 2>&1) &
 
 # ============================================================
