@@ -7,7 +7,7 @@ URC_ROOT="${CLAUDE_PLUGIN_ROOT:-.}"
 
 # Read the user's prompt from stdin
 INPUT=$(cat)
-PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)
+PROMPT=$(echo "$INPUT" | jq -r '.user_prompt // empty' 2>/dev/null)
 [ -z "$PROMPT" ] && PROMPT="$INPUT"
 
 # Match /urc, /rc-any, /rc-bridge, /rc-relay patterns
@@ -19,7 +19,7 @@ if echo "$PROMPT" | grep -qiE '^\s*/urc\b|^\s*/rc-any\b|^\s*/rc-bridge\b|^\s*/rc
   RESULT=$(bash "$URC_ROOT/urc/core/urc-dispatch.sh" "$ARG" "${TMUX_PANE:-}" 2>/dev/null)
 
   # Return result as additional context so the model just displays it
-  echo "$RESULT"
+  echo "{\"systemMessage\":\"URC dispatch result: $RESULT\"}"
   exit 0
 fi
 
