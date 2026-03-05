@@ -110,11 +110,12 @@ Using the CLI Config Map above for the resolved CLI_TYPE:
   tmux split-window -h -d -P -F '#{pane_id}' -t SPLIT_TARGET
   ```
   Store the output as TARGET_PANE
-- Wait 1 second, then send the CLI launch command via tmux-send-helper:
+- Wait 1 second, then `cd` to URC root and launch the CLI:
   ```
-  bash "$URC_ROOT/urc/core/tmux-send-helper.sh" TARGET_PANE "LAUNCH_COMMAND" --force
+  bash "$URC_ROOT/urc/core/tmux-send-helper.sh" TARGET_PANE "cd $URC_ROOT && LAUNCH_COMMAND" --force
   ```
   Where LAUNCH_COMMAND is `codex --full-auto` or `gemini --yolo` per the config map.
+  The `cd` ensures the CLI's CWD is the URC project root, so MCP server configs (which use relative paths) work correctly.
 - Wait 5 seconds for the CLI to boot
 - Register the pane in the coordination DB using MCP tools:
   ```
