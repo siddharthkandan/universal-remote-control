@@ -54,10 +54,11 @@ else
     RAW_PAYLOAD=$(cat)
 
     if [ -n "$RAW_PAYLOAD" ]; then
+        # Detect Gemini by prompt_response (unique to Gemini).
+        # Do NOT use hook_event_name — both Claude and Gemini have it.
         HAS_PROMPT_RESPONSE=$(printf '%s' "$RAW_PAYLOAD" | jq -r 'has("prompt_response")' 2>/dev/null)
-        HAS_HOOK_EVENT=$(printf '%s' "$RAW_PAYLOAD" | jq -r 'has("hook_event_name")' 2>/dev/null)
 
-        if [ "$HAS_PROMPT_RESPONSE" = "true" ] || [ "$HAS_HOOK_EVENT" = "true" ]; then
+        if [ "$HAS_PROMPT_RESPONSE" = "true" ]; then
             # ── GEMINI PATH ──────────────────────────────────────
             CLI_TYPE="gemini"
             RESPONSE=$(printf '%s' "$RAW_PAYLOAD" | jq -r '.prompt_response // empty' 2>/dev/null)

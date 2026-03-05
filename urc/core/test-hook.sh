@@ -51,6 +51,18 @@ _check test "$(echo "$RESP" | jq -r '.cli' 2>/dev/null)" = "gemini"
 
 rm -f "$PROJECT_ROOT/.urc/responses/%test99.json" "$PROJECT_ROOT/.urc/signals/done_%test99"
 
+rm -f "$PROJECT_ROOT/.urc/responses/%test99.json" "$PROJECT_ROOT/.urc/signals/done_%test99"
+
+echo ""
+echo "=== Test 3b: Claude payload WITH hook_event_name (regression) ==="
+echo '{"hook_event_name":"Stop","stop_hook_active":true,"last_assistant_message":"Claude with hook_event_name"}' | \
+    TMUX_PANE="%test99" bash "$HOOK" >/dev/null 2>&1
+RESP=$(cat "$PROJECT_ROOT/.urc/responses/%test99.json" 2>/dev/null || echo "{}")
+_check test "$(echo "$RESP" | jq -r '.cli' 2>/dev/null)" = "claude"
+_check test "$(echo "$RESP" | jq -r '.response' 2>/dev/null)" = "Claude with hook_event_name"
+
+rm -f "$PROJECT_ROOT/.urc/responses/%test99.json" "$PROJECT_ROOT/.urc/signals/done_%test99"
+
 echo ""
 echo "=== Test 4: SHA-256 checksum present ==="
 echo '{"last_assistant_message":"checksum test"}' | \
