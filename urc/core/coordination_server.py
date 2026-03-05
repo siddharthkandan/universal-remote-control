@@ -5,9 +5,10 @@ coordination_server.py — MCP server for URC state coordination.
 Wraps coordination_db and jsonl_recovery as MCP tools over STDIO transport.
 Agents register, send heartbeats, and query health via this server.
 
-15 tools: register_agent, heartbeat, health_check, claim_task, complete_task,
+16 tools: register_agent, heartbeat, health_check, claim_task, complete_task,
 send_message, receive_messages, get_fleet_status, report_event, rename_agent,
-dispatch_to_pane, read_pane_output, kill_pane, relay_forward, relay_read.
+dispatch_to_pane, read_pane_output, kill_pane, relay_forward, relay_read,
+bootstrap_validate.
 
 Usage (normal):
     python3 urc/core/coordination_server.py
@@ -800,13 +801,55 @@ def relay_read(my_pane: str, lines: int = 100) -> dict:
         return {"error": str(e), "tool": "relay_read"}
 
 
+@mcp.tool()
+def bootstrap_validate() -> dict:
+    """Validate URC setup: CWD, directories, hook configs, tmux, MCP servers.
+    Call this before any cross-CLI operation to catch setup issues early.
+    """
+    issues = []
+    # 1. Check CWD contains urc/core/
+    if not os.path.isdir(os.path.join(_project_root, "urc", "core")):
+        issues.append({"severity": "error", "check": "cwd",
+                       "message": f"URC project root not found. CWD: {_project_root}"})
+    # 2. Check/create .urc/ directories
+    for d in ["responses", "signals", "streams", "locks", "timeout"]:
+        path = os.path.join(_project_root, ".urc", d)
+        if not os.path.isdir(path):
+            os.makedirs(path, exist_ok=True)
+            issues.append({"severity": "fixed", "check": f"dir_{d}",
+                           "message": f"Created missing directory: .urc/{d}"})
+    # 3. Check tmux is accessible
+    try:
+        subprocess.run(["tmux", "list-sessions"], capture_output=True, timeout=3)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        issues.append({"severity": "error", "check": "tmux",
+                       "message": "tmux not accessible"})
+    # 4. Check hook script exists
+    hook_path = os.path.join(_project_root, "urc", "core", "turn-complete-hook.sh")
+    if not os.path.isfile(hook_path):
+        issues.append({"severity": "error", "check": "hook",
+                       "message": "turn-complete-hook.sh not found"})
+    # 5. Check dispatch-and-wait.sh exists
+    daw_path = os.path.join(_project_root, "urc", "core", "dispatch-and-wait.sh")
+    if not os.path.isfile(daw_path):
+        issues.append({"severity": "warning", "check": "dispatch_and_wait",
+                       "message": "dispatch-and-wait.sh not found"})
+    # 6. Check lib-cli.sh exists
+    lib_path = os.path.join(_project_root, "urc", "core", "lib-cli.sh")
+    if not os.path.isfile(lib_path):
+        issues.append({"severity": "warning", "check": "lib_cli",
+                       "message": "lib-cli.sh not found"})
+    errors = [i for i in issues if i["severity"] == "error"]
+    return {"valid": len(errors) == 0, "issues": issues, "project_root": _project_root}
+
+
 # ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------
 
 
 def _run_self_test():
-    """Exercise all 15 tools via direct function calls against in-memory DB."""
+    """Exercise all 16 tools via direct function calls against in-memory DB."""
     import tempfile
     from urc.core.coordination_db import (
         get_connection, init_schema, get_agent, create_task,
@@ -958,7 +1001,13 @@ def _run_self_test():
         )
         assert rr_result.get("tool") == "relay_read"
 
-    print("PASS: coordination_server self-test (15 tools)")
+        # ── Tool 16: bootstrap_validate ──────────────────────────────
+        bv_result = bootstrap_validate()
+        assert isinstance(bv_result, dict), "bootstrap_validate returned non-dict"
+        assert "valid" in bv_result, f"bootstrap_validate missing 'valid' key: {bv_result}"
+        assert "project_root" in bv_result
+
+    print("PASS: coordination_server self-test (16 tools)")
     sys.exit(0)
 
 
