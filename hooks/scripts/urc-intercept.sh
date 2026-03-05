@@ -6,7 +6,9 @@
 URC_ROOT="${CLAUDE_PLUGIN_ROOT:-.}"
 
 # Read the user's prompt from stdin
-PROMPT=$(cat)
+INPUT=$(cat)
+PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)
+[ -z "$PROMPT" ] && PROMPT="$INPUT"
 
 # Match /urc, /rc-any, /rc-bridge, /rc-relay patterns
 if echo "$PROMPT" | grep -qiE '^\s*/urc\b|^\s*/rc-any\b|^\s*/rc-bridge\b|^\s*/rc-relay\b'; then
