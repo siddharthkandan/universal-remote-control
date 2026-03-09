@@ -109,10 +109,10 @@ else
   fail "agents/rc-bridge.md missing"
 fi
 
-if [[ -f skills/rc-bridge/SKILL.md ]]; then
-  pass "skills/rc-bridge/SKILL.md found"
+if [[ -f skills/rc-any/SKILL.md ]]; then
+  pass "skills/rc-any/SKILL.md found"
 else
-  fail "skills/rc-bridge/SKILL.md missing"
+  fail "skills/rc-any/SKILL.md missing"
 fi
 
 echo ""
@@ -130,10 +130,10 @@ else
   [[ $FAIL -eq 0 ]] && exit 0 || exit 1
 fi
 
-if PYTHONPATH="$PROJECT_ROOT" .venv/bin/python3 -c "from urc.core import coordination_server" 2>/dev/null; then
-  pass "coordination_server imports"
+if PYTHONPATH="$PROJECT_ROOT" .venv/bin/python3 -c "from urc.core import server" 2>/dev/null; then
+  pass "server imports"
 else
-  fail "coordination_server import failed"
+  fail "server import failed"
 fi
 
 if PYTHONPATH="$PROJECT_ROOT" .venv/bin/python3 -c "from urc.core import teams_server" 2>/dev/null; then
@@ -147,10 +147,10 @@ echo ""
 # ── 5. Self-Tests ───────────────────────────────────────────────────
 echo "Self-Tests"
 
-if PYTHONPATH="$PROJECT_ROOT" .venv/bin/python3 urc/core/coordination_server.py --self-test 2>/dev/null | grep -q "PASS"; then
-  pass "coordination_server self-test"
+if PYTHONPATH="$PROJECT_ROOT" .venv/bin/python3 urc/core/server.py --self-test 2>/dev/null | grep -q "PASS"; then
+  pass "server self-test"
 else
-  fail "coordination_server self-test failed"
+  fail "server self-test failed"
 fi
 
 if PYTHONPATH="$PROJECT_ROOT" .venv/bin/python3 urc/core/teams_server.py --self-test 2>/dev/null | grep -q "PASS"; then
@@ -168,6 +168,23 @@ echo "Extras"
 [[ -f README.md ]] && pass "README.md exists" || warn "No README.md"
 [[ -f LICENSE ]] && pass "LICENSE exists" || warn "No LICENSE"
 [[ -f .mcp.json ]] && pass ".mcp.json exists (git-clone mode)" || warn "No .mcp.json"
+
+# -- Duplicate Hook Detection --
+echo "-- Duplicate Hook Detection --"
+if [ -f ".claude/settings.json" ] && [ -f "hooks/hooks.json" ]; then
+    for event in Stop SessionStart PostToolUse UserPromptSubmit; do
+        s_cmds=$(jq -r ".hooks.${event}[]?.hooks[]?.command // empty" .claude/settings.json 2>/dev/null | sort)
+        p_cmds=$(jq -r ".hooks.${event}[]?.hooks[]?.command // empty" hooks/hooks.json 2>/dev/null | sort)
+        dupes=$(comm -12 <(echo "$s_cmds") <(echo "$p_cmds"))
+        if [ -n "$dupes" ]; then
+            warn "Duplicate $event hooks in both settings.json and hooks.json (idempotent guards required):"
+            echo "$dupes" | while read -r cmd; do
+                [ -n "$cmd" ] && echo "  $cmd"
+            done
+        fi
+    done
+fi
+pass "Duplicate hook detection complete"
 
 echo ""
 

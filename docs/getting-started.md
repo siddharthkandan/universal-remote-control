@@ -45,11 +45,8 @@ cd universal-remote-control
 Verify:
 
 ```bash
-.venv/bin/python3 urc/core/coordination_server.py --self-test
-# Expected: PASS: coordination_server self-test (13 tools)
-
-.venv/bin/python3 urc/core/teams_server.py --self-test
-# Expected: PASS: teams_server self-test (15/15 checks)
+.venv/bin/python3 urc/core/server.py --self-test
+# Expected: PASS: server.py self-test (11 tools)
 ```
 
 ## Bridge a Codex Pane to Your Phone
@@ -90,37 +87,36 @@ You can also initiate bridges from inside the target CLI:
 1. `/urc` spawns a Haiku relay pane running the `rc-bridge` agent
 2. The relay connects to your phone via Remote Control (`/remote-control`)
 3. You type a message on your phone
-4. The relay forwards it to the target pane via `dispatch_to_pane()`
-5. Bash polls `.urc/signals/done_PANE` for the turn signal
-6. `read_pane_output()` captures the response
+4. The relay calls `bash urc/core/send.sh "%TARGET" "message"` (fire-and-forget, returns in <2s)
+5. The relay shows "Sent to %TARGET (CLI_TYPE)"
+6. When the target completes its turn, `hook.sh` pushes the response back to the relay via `__urc_push__`
 7. The relay displays the output verbatim on your phone
 
 The bridge is stateless — `/clear` is safe. State lives in tmux pane options.
 
-## Cross-CLI Teams
+Additional features: push attribution (shows who asked what), auto-reconnect (spawns replacement if target dies, up to 3 attempts), and health dashboard (`status` command).
 
-To set up structured messaging between agents, both MCP servers must be running.
-The `.mcp.json` configures both:
+## MCP Configuration
+
+The coordination server provides 11 MCP tools for pane management, dispatch, and messaging.
+The `.mcp.json` configures it:
 
 ```json
 {
   "mcpServers": {
     "urc-coordination": {
       "command": ".venv/bin/python3",
-      "args": ["urc/core/coordination_server.py"],
-      "env": { "PYTHONPATH": "." }
-    },
-    "urc-teams": {
-      "command": ".venv/bin/python3",
-      "args": ["urc/core/teams_server.py"],
+      "args": ["urc/core/server.py"],
       "env": { "PYTHONPATH": "." }
     }
   }
 }
 ```
 
-Claude Code auto-starts both from `.mcp.json`. Codex and Gemini configs are in
+Claude Code auto-starts the server from `.mcp.json`. Codex and Gemini configs are in
 `.codex/config.toml` and `.gemini/settings.json`.
+
+> **Note:** The Teams protocol (`urc/core/teams_server.py`) is dormant and not loaded by default. It can be re-enabled by adding a `urc-teams` entry to `.mcp.json` if needed.
 
 ## Troubleshooting
 
@@ -131,3 +127,4 @@ Claude Code auto-starts both from `.mcp.json`. Codex and Gemini configs are in
 | Turn completion not detected | Check hook config: `.codex/config.toml` (notify) or `.gemini/settings.json` (AfterAgent) |
 | RC disconnects | Re-run `/remote-control` in the relay pane for a new session |
 | MCP server won't start | Run `./setup.sh` again, verify `.venv/bin/python3` works |
+| Gemini MCP tools missing | Run `gemini mcp list` to check server connection. If connected but tools hidden: check `~/.gemini/policies/urc-mcp.toml` exists (re-run `./setup.sh`). Remove any `tools.allowed` whitelist from `~/.gemini/settings.json`. Note: `/tools` hides MCP tools by design — use `/mcp list` instead. |

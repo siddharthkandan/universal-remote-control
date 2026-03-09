@@ -29,7 +29,56 @@ mcp__urc-coordination__register_agent(pane_id=CODEX_PANE, cli="codex-cli", role=
 mcp__urc-coordination__heartbeat(pane_id=CODEX_PANE, context_pct=0)
 ```
 
-### 3. Spawn Claude Code relay pane
+### 3. Check for orphaned relay (before spawning a new one)
+
+An orphaned relay is a Haiku bridge pane whose original target died. Instead of spawning a new relay, re-pair the orphan with this Codex pane.
+
+Call MCP tool:
+```
+mcp__urc-coordination__get_fleet_status()
+```
+
+Scan the results for agents where `role` is `"bridge"` AND `label` contains `"CODEX"` (case-insensitive).
+
+For each candidate relay pane (CANDIDATE_PANE):
+
+1. Check if its target is dead by running shell command:
+   ```
+   tmux display-message -t $(tmux show-options -pv -t CANDIDATE_PANE @bridge_target) -p '#{pane_id}' 2>&1
+   ```
+   If this command fails (returns error / non-zero exit), the target is dead — this relay is orphaned.
+
+2. If orphaned relay found, re-pair it:
+   - Extract CODEX_NUM = CODEX_PANE without the `%` prefix (e.g. `856`)
+   - Update tmux pane options to re-pair:
+     ```
+     tmux set-option -p -t CANDIDATE_PANE @bridge_target CODEX_PANE
+     tmux set-option -p -t CODEX_PANE @bridge_relay CANDIDATE_PANE
+     ```
+   - Update the relay's label in the coordination DB:
+     ```
+     mcp__urc-coordination__rename_agent(pane_id=CANDIDATE_PANE, label="(CODEX_NUM) CODEX")
+     ```
+   - Wake the relay with a refresh signal:
+     ```
+     bash urc/core/send.sh CANDIDATE_PANE "__urc_refresh__"
+     ```
+   - Store CANDIDATE_PANE as RELAY_PANE
+   - Display:
+     ```
+     RC Bridge re-paired!
+
+       Relay:  RELAY_PANE (Haiku, re-used)
+       Target: CODEX_PANE (Codex)
+
+     Existing orphaned relay was reconnected
+     to this pane. No new relay spawned.
+     ```
+   - **STOP here** — skip steps 4, 5, and 6.
+
+3. If no orphaned relay found, continue to step 4.
+
+### 4. Spawn Claude Code relay pane
 
 Run shell command:
 ```
@@ -37,28 +86,28 @@ tmux split-window -v -d -P -F '#{pane_id}' -t $TMUX_PANE "cd $(pwd) && source .v
 ```
 Store the output as RELAY_PANE (e.g. `%860`).
 
-### 4. Wait for relay boot
+### 5. Wait for relay boot
 
 Wait 8 seconds for Claude Code to initialize:
 ```
 sleep 8
 ```
 
-### 5. Bootstrap the relay
+### 6. Bootstrap the relay
 
 Extract CODEX_NUM = CODEX_PANE without the `%` prefix (e.g. `856`).
 
 Send the bootstrap message:
 ```
-bash urc/core/tmux-send-helper.sh RELAY_PANE "(CODEX_NUM) CODEX" --force
+bash urc/core/send.sh RELAY_PANE "(CODEX_NUM) CODEX"
 ```
 
 For example, if CODEX_PANE is `%856` and RELAY_PANE is `%860`:
 ```
-bash urc/core/tmux-send-helper.sh %860 "(856) CODEX" --force
+bash urc/core/send.sh %860 "(856) CODEX"
 ```
 
-### 6. Confirm to user
+### 7. Confirm to user
 
 Display:
 ```
@@ -71,4 +120,4 @@ This pane is now accessible from your
 Claude Code phone app via the relay.
 ```
 
-The relay agent activates `/remote-control` itself as its last bootstrap step (background-scheduled, fires 3s after bootstrap turn ends). No need to send `/rc` externally.
+The `/remote-control` activation is handled by `urc-spawn.sh` externally (not by the relay agent itself). No need to send `/rc` externally.

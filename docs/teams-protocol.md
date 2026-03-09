@@ -1,6 +1,15 @@
 # Teams Protocol — Cross-CLI Structured Messaging
 
-**Status: Stable**
+**Status: Dormant** — removed from `.mcp.json` as of v3 (2026-03-07)
+
+> **Note:** The Teams protocol is dormant. It has been removed from active
+> MCP configuration. The primary communication paths in v3 are:
+>
+> 1. **Synchronous dispatch** — `dispatch-and-wait.sh` (send + wait + read, returns structured JSON)
+> 2. **Fire-and-forget** — `dispatch_to_pane` MCP tool via the coordination server (`urc/core/server.py`)
+>
+> This document is preserved for reference and potential future reactivation.
+> See `urc/core/server.py` (11 tools) for the active coordination server.
 
 The Teams Protocol replaces raw tmux keystroke injection with structured,
 typed messaging for inter-agent coordination. Claude, Codex, and Gemini
@@ -349,22 +358,20 @@ move the project directory.
 
 ```json
 {
-  "tools": {
-    "mcpServers": {
-      "urc-teams": {
-        "command": "/absolute/path/to/project/.venv/bin/python3",
-        "args": ["/absolute/path/to/project/urc/core/teams_server.py"],
-        "env": {
-          "PYTHONPATH": "/absolute/path/to/project"
-        }
+  "mcpServers": {
+    "urc-teams": {
+      "command": "/absolute/path/to/project/.venv/bin/python3",
+      "args": ["/absolute/path/to/project/urc/core/teams_server.py"],
+      "env": {
+        "PYTHONPATH": "/absolute/path/to/project"
       }
     }
   }
 }
 ```
 
-Gemini also requires absolute paths. The `tools.mcpServers` nesting is
-specific to Gemini's settings schema.
+Gemini uses a flat `mcpServers` key at the top level (no `tools` wrapper).
+Absolute paths are required.
 
 ### Self-test
 
@@ -392,7 +399,7 @@ A PostToolUse hook checks for a signal file at `.urc/inbox/%PANE.signal` (single
 **Layer 4: tmux Wake Signal (idle agents)**
 When `team_send()` commits a message to SQLite, it also:
 1. Writes a signal file (`.urc/inbox/%NNN.signal`) for hook piggyback
-2. Sends a ~60-char wake signal via `tmux-send-helper.sh --force --verify`
+2. Sends a ~60-char wake signal via `send.sh`
 The wake signal is NOT the message — it's a trigger telling the agent to call `team_inbox()`. The actual message stays in SQLite (durable, queryable, structured).
 
 **Delivery Tracking:**
@@ -521,7 +528,7 @@ Universal Remote Control has **two coordination mechanisms** that coexist withou
 | **Inbox polling** | Automatic (framework, between API turns) | Manual (`team_inbox` MCP call) |
 | **Idle detection** | Auto `idle_notification` on turn end | Silence thresholds + heartbeat |
 | **Lifecycle** | Session-scoped (TeamCreate → TeamDelete) | Project-scoped (persistent) |
-| **Spawning** | Agent tool (spawn-only, fresh workers) | `tmux split-window` + `tmux-send-helper.sh` (any CLI) |
+| **Spawning** | Agent tool (spawn-only, fresh workers) | `tmux split-window` + `send.sh` (any CLI) |
 
 ### When to use which
 

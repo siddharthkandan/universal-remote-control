@@ -8,101 +8,170 @@ URC enables cross-CLI communication between Claude Code, Codex, and Gemini panes
 The RC Bridge lets you control this Codex pane from the Claude Code phone app:
 1. A Claude Code Haiku relay pane spawns alongside your pane
 2. It receives a bootstrap message like `(856) CODEX` to pair with your pane
-3. Phone messages go to the relay, which forwards them to your pane via MCP tools
-4. Your output is read back and displayed on the phone
+3. Phone messages go to the relay, which forwards them to your pane via `send.sh` (fire-and-forget)
+4. Your output is pushed back to the relay via `__urc_push__` and displayed on the phone
 
 Launch with: `/rc-bridge`
 
 ## Available MCP Tools
 
-### urc-coordination (pane communication)
+### urc-coordination (pane communication — 11 tools)
 | Tool | Purpose |
 |------|---------|
-| `dispatch_to_pane` | Send a message to a tmux pane via tmux-send-helper.sh |
-| `read_pane_output` | Capture recent output from a pane's tmux buffer |
-| `register_agent` | Register a pane in the coordination database |
+| `register_agent` | Register a pane (auto-called on first tool use — no manual registration needed) |
 | `heartbeat` | Send heartbeat update for a pane |
-| `rename_agent` | Set display label for a pane |
 | `get_fleet_status` | List all registered agents and their status |
-| `send_message` | Send inter-agent message |
+| `rename_agent` | Set display label for a pane |
+| `dispatch_to_pane` | Send a message to a tmux pane via send.sh |
+| `read_pane_output` | Capture recent output from a pane's tmux buffer |
+| `send_message` | Send inter-agent message (use `notify=true` to include wake nudge) |
 | `receive_messages` | Get unread messages |
-| `report_event` | Record a structured event |
-| `health_check` | Return server health metrics (uptime, DB size, agent/task/message counts) |
-| `claim_task` | Claim the highest-priority pending task for this agent |
-| `complete_task` | Mark a claimed task as completed (with optional commit SHA) |
 | `kill_pane` | Kill a tmux pane (requires explicit confirmation) |
+| `cancel_dispatch` | SIGINT target + clear signals + unblock waiting dispatcher |
+| `bootstrap_validate` | Validate CWD/directories/hook/tmux setup |
 
-### urc-teams (cross-CLI messaging)
-Team creation, membership, task management, and typed messaging between CLI agents. See `urc/core/teams_server.py` for full tool list.
+### urc-teams (DORMANT — removed from .mcp.json)
+Teams protocol is dormant. The code exists in `urc/core/teams_server.py` but the MCP server is not loaded. Use `send_message`/`receive_messages` from urc-coordination for cross-CLI messaging instead.
 
 ## Turn Completion
 
-Your `notify` hook in `.codex/config.toml` fires `urc/core/turn-complete-hook.sh` after each turn. This:
-- Touches a turn signal file
-- Appends to `events.log`
-- Writes `signals/done_PANE` for filesystem polling
+Your `notify` hook in `.codex/config.toml` fires `urc/core/hook.sh` after each turn. This:
+- Writes response to `.urc/responses/{PANE}.json`
+- Touches signal file `.urc/signals/done_{PANE}`
+- Fires `tmux wait-for` to wake blocking dispatchers
+- Appends to JSONL audit stream `.urc/streams/{PANE}.jsonl`
 
-Other agents poll `signals/done_PANE` via Bash to detect when you finish.
+## Inbox & Bidirectional Messaging
+
+For async conversations with other agents, use DB messaging (see Communication Strategy below).
+
+Codex does NOT have an automatic inbox notification hook like Claude (PostToolUse) or Gemini (BeforeAgent). You must actively check for messages.
+
+**REQUIRED when working with other agents:** Call `mcp__urc-coordination__heartbeat(pane_id="%YOUR_PANE", status="active")` at the start of each turn. Check the return value for `inbox_hint`:
+```json
+{"status": "ok", "inbox_hint": "INBOX: 2 unread from %1316"}
+```
+If `inbox_hint` is present, immediately call `mcp__urc-coordination__receive_messages(pane_id="%YOUR_PANE")` to read your messages. Act on them before continuing other work.
+
+**Sending messages to other agents:**
+`mcp__urc-coordination__send_message(from_pane="%YOUR_PANE", to_pane="%TARGET", body="message", notify=true)`
+The recipient will be notified automatically via their CLI's inbox hook.
+
+**Why this matters:** Without checking heartbeat, you won't know other agents sent you messages. They'll think you're unresponsive.
+
+**Heartbeat `status` values:** Any freeform string (commonly "active", "idle", "busy") — informational, not enforced. The main purpose of calling heartbeat is getting the `inbox_hint` return value.
+
+**Idle notification (Layer 5):** Before going idle after dispatching background work, arm the inbox watcher: `bash urc/core/inbox-watcher.sh 120 &`. When it completes with `INBOX_READY`, call `receive_messages()` immediately. Re-arm after processing if expecting more messages.
+- **Inbox notifications (5-layer stack)**: PostToolUse piggyback (Claude), MCP middleware hints (heartbeat/fleet/dispatch/read), BeforeAgent hook (Gemini), tmux wake nudge (`notify=true`, rate-limited to 1 per 30s per recipient), background inbox watcher (Layer 5).
 
 ## Cross-Pane Communication
 
-**Find your pane ID:** Run `echo $TMUX_PANE` (returns e.g. `%856`).
+**Identity verification (before ANY cross-pane messaging):** Run `echo $TMUX_PANE` to confirm your own pane ID (returns e.g. `%856`). Pane IDs always start with `%` — this prefix is required in all tool calls. Never infer your identity from another pane's buffer — `read_pane_output` on other panes contains pane IDs that are NOT yours. Use your verified pane ID in all `from_pane` fields.
 
-**Discover other panes:** Call `mcp__urc-coordination__get_fleet_status()` to list all registered agents and their pane IDs.
+**Check pane alive:** `tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep '%NNN'` (~50 tokens).
 
-**Send a message directly into another pane's TUI (most reliable):**
+**Discover all agents:** `mcp__urc-coordination__get_fleet_status()` (~15.9K tokens) — only for fleet-wide discovery, orphan scans, or when you need agent metadata (cli, role, status, context%).
+```json
+[{"pane_id":"%1320","cli":"claude","status":"active","label":"spec-writer","alive":true}, ...]
+```
+**Do NOT call `get_fleet_status` before launching Agent Teams** — those are new subprocesses that don't exist in the fleet yet.
+
+**Send a message directly into another pane's TUI (fire-and-forget):**
 `mcp__urc-coordination__dispatch_to_pane(pane_id="%NNN", message="your message")`
-Returns `delivered`, `uncertain`, `queued`, or `failed`. Use `force=true` to inject even if the target is mid-turn.
+Returns `delivered` or `failed`.
 
-**Send a DB-stored message (includes wake nudge):**
+**Synchronous dispatch (for cross-pane work, NOT used by relay):**
+```bash
+bash urc/core/dispatch-and-wait.sh "%42" "message" 120
+```
+Returns structured JSON with status `completed` or `timeout`.
+
+**Send a DB-stored message:**
 `mcp__urc-coordination__send_message(from_pane="%YOUR_PANE", to_pane="%TARGET", body="message")`
+Use `notify=true` to include a wake nudge to the target pane.
 Recipient retrieves with `mcp__urc-coordination__receive_messages(pane_id="%TARGET")`.
 
-**Message size limit:** Keep dispatched messages under ~1000 characters. For longer content (handoffs, detailed tasks, multi-step instructions), write to a uniquely-named file and dispatch a short reference:
-  - Naming: `.urc/handoff-{FROM_PANE}-to-{TO_PANE}.md` (e.g. `.urc/handoff-896-to-906.md`)
-  - Strip the `%` from pane IDs in filenames
-  - For broadcast handoffs (no specific target): `.urc/handoff-{FROM_PANE}-{TIMESTAMP}.md`
-  - Then dispatch: `"Read .urc/handoff-896-to-906.md for full context"`
-  Long messages (3000+ chars) may be silently truncated by tmux paste buffers, even when `dispatch_to_pane` reports "delivered".
+**Message size limits:**
+- `dispatch_to_pane` / `dispatch-and-wait.sh`: text goes through tmux paste-buffer. Keep under **1000 chars**. 1000-3000 chars usually works but is not guaranteed; over 3000 risks silent truncation.
+- `send_message` (DB): no size limit (stored in SQLite). But the wake nudge text goes through tmux paste-buffer, so the nudge itself has the same limits.
+- For long content: write to `.urc/handoff-{FROM}-to-{TO}.md` (strip `%` from pane IDs) and dispatch a short reference like `"Read .urc/handoff-896-to-906.md"`. Sender creates; recipient deletes after reading. Handoff files are ephemeral.
 
 **Read what another pane is showing:**
 `mcp__urc-coordination__read_pane_output(pane_id="%NNN", lines=30)`
 
-**Teams protocol (structured cross-CLI collaboration):**
-`mcp__urc-teams__team_send`, `mcp__urc-teams__team_inbox`, `mcp__urc-teams__team_broadcast` — see `urc/core/teams_server.py`.
+**Teams protocol (DORMANT):**
+`mcp__urc-teams__team_send`, `mcp__urc-teams__team_inbox`, `mcp__urc-teams__team_broadcast` — these tools are not available. The Teams MCP server has been removed from `.mcp.json`. Use `send_message`/`receive_messages` for cross-pane messaging.
 
-### Dispatch-and-Wait Pattern (REQUIRED for cross-pane work)
+### Communication Strategy
 
-When you dispatch work to another pane, you MUST poll for their completion — do NOT fire-and-forget. Turn-completion hooks write signal files when any CLI finishes a turn.
+Pick the right approach based on what you need:
 
-**Full pattern:**
-1. **Clear** signal files: `rm -f .urc/signals/done_%NNN`
-2. **Dispatch** via `dispatch_to_pane(pane_id="%NNN", message="...")`
-3. **Poll** for completion:
-   ```bash
-   ELAPSED=0; while [ ! -f .urc/signals/done_%NNN ] && [ $ELAPSED -lt 300 ]; do sleep 3; ELAPSED=$((ELAPSED + 3)); done
-   [ -f .urc/signals/done_%NNN ] && echo "DONE" || echo "TIMEOUT"
-   ```
-4. **Read** output: `read_pane_output(pane_id="%NNN", lines=80)` — do this even on TIMEOUT
+| Need | Approach | Tool / Command |
+|------|----------|----------------|
+| Send and get the response now | Synchronous dispatch | `bash urc/core/dispatch-and-wait.sh "%NNN" "message" 120` |
+| Inject text, no response needed | Fire-and-forget | `dispatch_to_pane(pane_id="%NNN", message="...")` |
+| Async message / question / task | DB messaging | `send_message(from, to, body, notify=true)` + recipient calls `receive_messages` |
 
-**Why:** Without polling, you go silent after dispatch and the user must manually prompt you to check results. Timeout is not fatal — some CLIs may not have hooks configured. Always read output regardless.
+**Synchronous dispatch** — blocks until the target completes or times out:
+```bash
+bash urc/core/dispatch-and-wait.sh "%NNN" "your message" 120
+```
+Atomically: clears signals, dispatches, waits, reads response. Returns JSON with `status` (`completed` or `timeout`) and `response`. Timeout is not fatal — always read output regardless.
+Timeout guidance: 60s for simple questions, 120s (default) for most tasks, 180-300s for complex analysis or multi-file edits.
+
+**Background dispatch** — non-blocking, useful for parallel orchestration:
+```bash
+bash urc/core/dispatch-and-wait.sh "%42" "task A" 120 > /tmp/result-42.json &
+bash urc/core/dispatch-and-wait.sh "%43" "task B" 120 > /tmp/result-43.json &
+wait  # then read /tmp/result-*.json
+```
+Redirect output to temp files — without redirection, JSON results are interleaved and lost.
+
+**Fire-and-forget** — inject text into a pane's TUI, returns `delivered` or `failed`:
+`mcp__urc-coordination__dispatch_to_pane(pane_id="%NNN", message="...")`
+Sequential calls to the same pane are delivered in order. Concurrent calls to different panes run in parallel.
+
+**DB messaging** — persistent, async, with inbox notifications:
+- Send: `mcp__urc-coordination__send_message(from_pane="%YOU", to_pane="%TARGET", body="message", notify=true)`
+- Receive: `mcp__urc-coordination__receive_messages(pane_id="%YOU")`
+- Claude and Gemini get automatic inbox hints. **Codex does not** — you must call `heartbeat()` to discover unread messages (see Inbox section above).
+
+**Error handling:**
+- `timeout` — read pane output anyway (`read_pane_output`). Retry once after 5s with same timeout. If second timeout, message the orchestrator or user.
+- `failed` — pane is dead. Confirm: `tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -q '%NNN'` (~50 tokens). Don't retry — spawn a replacement or reassign to a live agent.
+
+**Return format (synchronous dispatch):**
+```json
+{"status":"completed","response":"...","pane":"%NNN","cli":"codex","latency_s":42}
+{"status":"timeout","captured":"last 40 lines of pane output..."}
+```
+
+**`notify` default:** `notify=true` is recommended for all interactive messaging. `notify=false`: use when storing a message for later retrieval (logging, batch collection) without interrupting the recipient. If `send_message` returns `wake: "failed"`, no action needed — the message is stored and the recipient discovers it via inbox hooks on their next turn.
+
+**`receive_messages` behavior:** Marks messages as read atomically — calling it twice returns nothing on the second call. Messages are ordered by DB insert time (FIFO).
+
+**Pane lookup costs:**
+- **Pane alive?** `tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -q '%NNN'` (~50 tokens)
+- **Full fleet?** `mcp__urc-coordination__get_fleet_status()` (~15.9K tokens) — only for fleet-wide discovery, orphan scans, health checks
+- **Agent Teams?** Do NOT call `get_fleet_status` before launching Agent Teams — they're new subprocesses, not in the fleet yet.
 
 ## Key Files
 
 | Component | File |
 |-----------|------|
-| Coordination server (13 MCP tools) | `urc/core/coordination_server.py` |
-| Teams server (17 MCP tools) | `urc/core/teams_server.py` |
-| Pane communication | `urc/core/tmux-send-helper.sh` |
-| Turn completion hook | `urc/core/turn-complete-hook.sh` |
+| Coordination server (11 MCP tools) | `urc/core/server.py` |
+| Teams server (DORMANT, 17 tools) | `urc/core/teams_server.py` |
+| Pane communication | `urc/core/send.sh` |
+| Turn completion hook | `urc/core/hook.sh` |
 | RC Bridge relay agent | `.claude/agents/rc-bridge.md` |
+| Inbox watcher (Layer 5) | `urc/core/inbox-watcher.sh` |
 | Codex config | `.codex/config.toml` |
 
 ## Pane Dispatch Rules
 
-- **Never use raw `tmux send-keys`** — always use `dispatch_to_pane` MCP tool or `tmux-send-helper.sh`
-- **Keep messages short** — under ~100 chars for wake-up nudges, under ~200 chars for instructions. Long messages with special characters can fail silently in the TUI input field.
-- **Check return status** — `delivered` = success, `queued` = retry with `force=true`, `uncertain` = text may be stuck in input field (retry shorter), `failed` = pane dead
+- **Never use raw `tmux send-keys`** — always use `dispatch_to_pane` MCP tool or `send.sh`. Note: `send.sh` skips Escape for Codex panes (Escape breaks Codex TUI input submission).
+- **Keep messages short** — under ~1000 chars for dispatched text (see Message size limits above). Use handoff files for longer content.
+- **Check return status** — `delivered` = success, `failed` = pane dead
 - **Verify after dispatch** — wait 5-10s, then `read_pane_output()` to confirm the target started processing
 - Core edits (`urc/core/`) require planning first
 - Commit frequently with descriptive messages

@@ -4,44 +4,71 @@ How URC detects when an AI CLI agent finishes a turn.
 
 ## What It Does
 
-`urc/core/turn-complete-hook.sh` is a universal hook script (~25 lines)
-that runs after every agent turn. It performs three actions:
+`urc/core/hook.sh` is a universal hook script that runs after every agent
+turn. It performs four actions in strict order (changing the order breaks
+`wait.sh`):
 
-1. **Touch signal file** — `touch .urc/turn_signal`
-   Consumers detect the mtime change to know a turn just finished.
+1. **Write response file** — Atomically writes the assistant's response to
+   `.urc/responses/{PANE}.json` via a temp file + `mv`. The JSON contains
+   5 fields: `{pane, cli, epoch, response, len}`.
 
-2. **Append audit line** — appends `<epoch> <pane_id> turn_complete` to
-   `.urc/events.log` for debugging.
+2. **Touch signal file** — `touch .urc/signals/done_{PANE}`
+   Per-pane file so multiple dispatches don't interfere.
 
-3. **Output JSON** — prints `{"continue": true}` to satisfy Gemini's hook
-   requirement. Codex ignores stdout.
+3. **tmux wait-for** — `tmux wait-for -S "urc_done_{PANE}"`
+   Wakes the blocking `wait.sh` dispatcher immediately.
+
+4. **Append JSONL audit** — Appends one JSON line to
+   `.urc/streams/{PANE}.jsonl` (best-effort, same 5-field schema).
 
 ### Pane ID Detection
 
-The hook resolves the pane ID using this fallback chain:
+The hook resolves the pane ID with a validation guard:
 
 ```bash
-PANE="${TMUX_PANE:-${URC_PANE_ID:-unknown}}"
+PANE="${TMUX_PANE:-unknown}"
+[[ "$PANE" == "unknown" || "$PANE" =~ ^%[0-9]+$ ]] || PANE="unknown"
 ```
 
-- `$TMUX_PANE` — set automatically by tmux
-- `$URC_PANE_ID` — set explicitly at pane launch
-- `"unknown"` — fallback
+- `$TMUX_PANE` — set automatically by tmux (always `%NNN` format)
+- `"unknown"` — fallback if not inside tmux
+
+### CLI Detection + Payload Parsing
+
+The hook identifies the calling CLI and extracts the response:
+
+- **Codex** — passes JSON as `$1` argument; field: `.["last-assistant-message"]`
+- **Gemini** — passes JSON on stdin; detected by `has("prompt_response")`; field: `.prompt_response`
+- **Claude** — passes JSON on stdin; field: `.last_assistant_message`
+
+Critical: `$1` is checked before stdin. Codex's stdin is `/dev/null`, so
+reading stdin without checking `$1` first would block forever.
+
+### Response File Schema
+
+```json
+{
+  "pane": "%42",
+  "cli": "codex",
+  "epoch": 1741363200,
+  "response": "The assistant's full response text...",
+  "len": 42
+}
+```
 
 ## CLI Wiring
 
 ### Claude — Stop hook
 
-Claude Code's hook system fires `turn-complete-hook.sh` via a Stop hook
-configured in `.claude/hooks/`. Claude can also call `report_event()` MCP
-tool directly for structured event reporting.
+Claude Code's hook system fires `hook.sh` via a Stop hook
+configured in `.claude/hooks/`.
 
 ### Codex — `notify` config
 
 Configured in `.codex/config.toml`:
 
 ```toml
-notify = ["bash", "urc/core/turn-complete-hook.sh"]
+notify = ["bash", "urc/core/hook.sh"]
 ```
 
 Codex fires this on the `agent-turn-complete` event.
@@ -58,7 +85,7 @@ Configured in `.gemini/settings.json` using the nested structure:
       "hooks": [{
         "name": "turn-signal",
         "type": "command",
-        "command": "bash /absolute/path/to/turn-complete-hook.sh"
+        "command": "bash /absolute/path/to/hook.sh"
       }]
     }]
   }
@@ -68,33 +95,44 @@ Configured in `.gemini/settings.json` using the nested structure:
 Gemini reads settings at startup — restart after config changes. Use an
 absolute path with explicit `bash` prefix.
 
-## `wait_for_turn_complete` MCP Tool (Deprecated)
+## Wait Mechanism
 
-The coordination server exposes `wait_for_turn_complete`, which polls
-`events.log` for new `turn_complete` entries.
+`urc/core/wait.sh` blocks until the target pane completes its turn:
 
-**Deprecated:** This tool blocked the MCP event loop and caused STDIO
-connection failures (`-32000: Connection closed`). The RC Bridge now uses
-filesystem signal polling instead: Bash polls `.urc/signals/done_PANE`
-at 2-second intervals with a 120-second timeout. The MCP tool remains
-available for backward compatibility but should not be used.
+1. Checks for a fresh response file (epoch >= dispatch timestamp)
+2. Blocks on `tmux wait-for "urc_done_{PANE}"` — woken by the hook
+3. A watchdog subprocess fires after the timeout, unblocking via the same
+   `tmux wait-for` channel
+
+Returns structured JSON:
+- **Completed**: `{status: "completed", response: "...", cli: "...", latency_s: N}`
+- **Timeout**: `{status: "timeout", captured: "..."}`
+
+The full dispatch cycle is driven by `urc/core/dispatch-and-wait.sh`, which
+wraps `send.sh` + `wait.sh` into an atomic lock + send + wait + read
+operation.
 
 ## Troubleshooting
 
 1. **Hook not firing** — check `chmod +x` on the hook script, verify CLI
    config (Codex: `notify` in config.toml, Gemini: `AfterAgent` in settings.json)
-2. **Test manually** — `bash urc/core/turn-complete-hook.sh` should
-   touch the signal file and append to events.log
-3. **Check events.log** — `tail -5 .urc/events.log` for
-   `turn_complete` entries
+2. **Test manually** — `bash urc/core/hook.sh` should
+   write to `.urc/responses/` and touch `.urc/signals/`
+3. **Check audit stream** — `tail -5 .urc/streams/%NNN.jsonl` for
+   per-pane turn records
+4. **Stale response** — `wait.sh` compares response epoch against dispatch
+   timestamp; stale responses are ignored and the signal file is cleared
 
 ## Key Files
 
 | File | Role |
 |------|------|
-| `urc/core/turn-complete-hook.sh` | Universal hook script |
-| `urc/core/coordination_server.py` | `wait_for_turn_complete` MCP tool (deprecated) |
+| `urc/core/hook.sh` | Universal turn-completion hook (3-CLI) |
+| `urc/core/wait.sh` | Blocking wait with watchdog timeout |
+| `urc/core/dispatch-and-wait.sh` | Atomic dispatch + wait + read composite |
+| `urc/core/send.sh` | Text injection via bracketed paste |
 | `.codex/config.toml` | Codex `notify` configuration |
 | `.gemini/settings.json` | Gemini `AfterAgent` hook configuration |
-| `.urc/turn_signal` | Shared signal file (mtime-based) |
-| `.urc/events.log` | Shared audit log |
+| `.urc/responses/{PANE}.json` | Per-pane response file (5-field JSON) |
+| `.urc/signals/done_{PANE}` | Per-pane signal file (mtime-based) |
+| `.urc/streams/{PANE}.jsonl` | Per-pane JSONL audit stream |

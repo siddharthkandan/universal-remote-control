@@ -13,53 +13,42 @@ and **Cross-CLI Communication** (structured messaging between Claude, Codex, and
         |  Remote Control
         v
   Haiku Relay (rc-bridge agent)
-        |  dispatch_to_pane / read_pane_output / signal file polling
+        |  send.sh (fire-and-forget) + __urc_push__ (response delivery)
         v
   +----------------------------------------------------------+
-  |  Coordination Server (13 MCP tools, STDIO transport)     |
+  |  Coordination Server (11 MCP tools, STDIO transport)     |
   |  SQLite WAL backend, auto-started via .mcp.json          |
   +----------+------------------+-----------------+----------+
              |                  |                 |
-       tmux-send-helper.sh  (state detection + retry + verify)
+       send.sh  (state detection + retry + verify)
              |                  |                 |
         +----+----+        +---+-----+       +---+-----+
         | Claude  |        | Codex   |       | Gemini  |
         | %391    |        | %392    |       | %393    |
         +---------+        +---------+       +---------+
-             |                  |                 |
-             |  MCP tools (team_send,             |
-             |   team_inbox, ...)                 |
-             +----------+------------------------+
-                        v
-         +--------------------------+
-         |  Teams Server            |  17 MCP tools, STDIO
-         |  (auto-started)          |  Cross-CLI messaging
-         +--------------------------+
 ```
 
 ---
 
 ## Layer Details
 
-### 1. Coordination Server (`urc/core/coordination_server.py`)
+### 1. Coordination Server (`urc/core/server.py`)
 
-MCP server with 13 tools over STDIO transport. Auto-started from `.mcp.json`.
+MCP server with 11 tools over STDIO transport. Auto-started from `.mcp.json`.
 
 | Tool | Purpose |
 |------|---------|
 | `register_agent` | Register/re-register agent |
 | `heartbeat` | Update agent status + context % |
-| `health_check` | Server uptime + DB stats |
-| `claim_task` | Claim highest-priority pending task |
-| `complete_task` | Mark task as completed |
 | `send_message` | Send message between agents |
 | `receive_messages` | Read unread messages |
 | `get_fleet_status` | List all agents with heartbeat age |
-| `report_event` | Record structured event |
 | `rename_agent` | Set display label |
 | `dispatch_to_pane` | Send message to tmux pane (reliable delivery) |
 | `read_pane_output` | Capture pane's visible output |
 | `kill_pane` | Kill tmux pane (requires confirmation) |
+| `cancel_dispatch` | SIGINT target + clear signals + unblock waiting dispatcher |
+| `bootstrap_validate` | Validate CWD/directories/hook/tmux setup |
 
 State stored in `.urc/coordination.db` (SQLite WAL).
 
@@ -71,17 +60,22 @@ A Haiku-powered passthrough relay that bridges your phone to a Codex or Gemini p
 verbatim, output displayed verbatim.
 
 **State recovery:** State lives in tmux pane options (`@bridge_target`, `@bridge_cli`,
-`@bridge_relays`), not in context. `/clear` is safe.
+`@bridge_relays`, `@bridge_respawns`), not in context. `/clear` is safe.
 
-**Message loop:**
-1. `dispatch_to_pane()` — send user message
-2. Poll `signals/done_PANE` via Bash (2s interval, 120s timeout)
-3. `read_pane_output()` — capture response
-4. Display output in code block
+**Message loop (async):**
+1. `bash urc/core/send.sh "%TARGET" "message"` — fire-and-forget dispatch
+2. Returns instantly with `{status: "delivered"}` or `{status: "failed"}`
+3. Display "Sent to %TARGET (CLI_TYPE)"
+4. Response arrives later via `__urc_push__` (pushed by hook.sh when target completes)
 
-### 3. RC Bridge Skill (`.claude/skills/rc-bridge/SKILL.md`)
+**Additional features:**
+- Push attribution: shows who dispatched and what was asked
+- Auto-reconnect: if target dies, spawns replacement (3 attempts max)
+- Health dashboard: "status" command shows target alive/dead, relay count, respawn count
 
-Universal launcher for bridge sessions. Invocable as `/rc-bridge`.
+### 3. RC Bridge Skill (`.claude/skills/rc-any/SKILL.md`)
+
+Universal launcher for bridge sessions. Invocable as `/rc-bridge`, `/rc-any`, `/rc-relay`.
 
 | Usage | What happens |
 |-------|-------------|
@@ -90,56 +84,55 @@ Universal launcher for bridge sessions. Invocable as `/rc-bridge`.
 | `/rc-bridge gemini` | Spawn new Gemini pane + bridge it |
 | `/rc-bridge` (empty) | List unbridged Codex/Gemini panes |
 
-### 4. Teams Server (`urc/core/teams_server.py`)
+### 4. Teams Server (`urc/core/teams_server.py`) — DORMANT
 
-MCP server with 17 tools for structured cross-CLI messaging. Works with
-Claude, Codex, and Gemini.
+MCP server with 17 tools for structured cross-CLI messaging. Currently
+dormant (removed from `.mcp.json`). Preserved for future rebuild.
 
-**Message types:** `message`, `task_assignment`, `status_update`, `completion`,
-`idle_notification`, `shutdown_request`, `shutdown_response`,
-`plan_approval_request`, `plan_approval_response`.
+### 4b. Inbox Notification Architecture (active, 5-layer stack)
 
-**Notification architecture:** 4-layer stack:
-1. Spawn-time instructions (agents check inbox after tasks)
-2. MCP middleware hints (unread counts appended to tool responses)
-3. PostToolUse hook piggyback (Claude only, via signal files)
-4. tmux wake signals (for idle agents)
+1. **PostToolUse piggyback** (Claude): `.claude/hooks/inbox-piggyback.sh` — O(1) stat, uses `additionalContext`
+2. **MCP middleware hints**: `_peek_inbox_hint()` in heartbeat, get_fleet_status, dispatch_to_pane, read_pane_output
+3. **BeforeAgent hook** (Gemini): `.gemini/hooks/inbox-inject.sh` — additionalContext injection with broadcast dedup
+4. **tmux wake nudge**: `send_message(notify=True)` sends text to idle pane (rate-limited: 30s cooldown per recipient)
+5. **Background inbox watcher**: `urc/core/inbox-watcher.sh` — agent arms via background task, blocks on `tmux wait-for`, completes when message arrives
 
 ### 5. Pane Dispatch Best Practices
 
-`dispatch_to_pane()` is the MCP wrapper around `tmux-send-helper.sh`. It handles
+`dispatch_to_pane()` is the MCP wrapper around `send.sh`. It handles
 state detection, CLI-aware delays, Enter retries, and delivery verification. But
 it has limitations that callers must understand.
 
 **Message length matters:**
-- Messages under ~200 chars are most reliable (sent character-by-character via `tmux send-keys -l`)
-- Messages over 1000 chars use `tmux load-buffer` + `paste-buffer` (atomic but slower to settle)
-- Long messages with special characters (quotes, backticks, braces) can partially render
-  in the TUI input field, causing the Enter key to be swallowed silently
+- All messages use `tmux load-buffer` + `paste-buffer` (bracketed paste) for reliability
+- Keep messages under ~1000 chars. 1000-3000 chars usually works; over 3000 risks silent truncation
+- A pre-Enter fingerprint check (2s timeout) verifies text appeared before pressing Enter
 
-**Return statuses and what to do:**
+**Return statuses:**
 
-| Status | Meaning | Action |
-|--------|---------|--------|
-| `delivered` | Helper confirmed content changed in target pane | Success — proceed |
-| `uncertain` | Text appeared but Enter wasn't confirmed after 4 retries, OR force-sent to a PROCESSING pane | Message may be stuck in input field — retry with a shorter message |
-| `queued` | Target is PROCESSING and `force=false` | Re-dispatch with `force=true` |
-| `failed` | Pane doesn't exist, helper error, or cross-group block | Check error message — pane may be dead |
+| Path | Status | Meaning |
+|------|--------|---------|
+| Send (`send.sh` / `dispatch_to_pane`) | `delivered` | tmux commands succeeded (NOT confirmation that text was submitted — known limitation) |
+| Send | `failed` | Pane doesn't exist, helper error, or send failure |
+| Wait (`dispatch-and-wait.sh`) | `completed` | Response received within timeout |
+| Wait | `timeout` | No response within timeout window |
 
 **Rules for inter-agent messaging:**
 1. **Keep messages short** — under ~100 chars for wake-up nudges, under ~200 chars for instructions
-2. **Never use raw `tmux send-keys`** — always go through `dispatch_to_pane()` or `tmux-send-helper.sh`
-3. **Use `force=false` first** — gets clean `failed` for dead panes and `queued` for busy ones
-4. **Verify after dispatch** — wait 5-10s, then `read_pane_output()` to confirm the target started processing
-5. **If `uncertain`, retry shorter** — the original text likely landed in the input field but wasn't submitted
+2. **Never use raw `tmux send-keys`** — always go through `dispatch_to_pane()` or `send.sh`
+3. **Prefer `dispatch-and-wait.sh`** for synchronous relay — atomic dispatch + wait + read in one call
+4. **Use `dispatch_to_pane` MCP tool** for fire-and-forget sends (no wait)
 
 ### 6. Shell Infrastructure
 
 | Script | Purpose |
 |--------|---------|
-| `tmux-send-helper.sh` | Reliable pane dispatch (the ONLY approved send path) |
-| `observer.sh` | State detection + pane resolution |
-| `turn-complete-hook.sh` | Turn completion signals for all CLIs |
+| `dispatch-and-wait.sh` | Atomic dispatch + wait + read (relay composite) |
+| `send.sh` | Reliable pane dispatch (the ONLY approved send path) |
+| `wait.sh` | tmux wait-for blocking, epoch correlation, watchdog |
+| `hook.sh` | Turn completion signals + response capture for all CLIs |
+| `cli-adapter.sh` | CLI-specific field mapping (source, don't execute) |
+| `inbox-watcher.sh` | Layer 5 inbox watcher (blocks on tmux wait-for until message arrives) |
 
 ---
 
