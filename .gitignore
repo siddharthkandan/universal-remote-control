@@ -26,6 +26,11 @@ dist/
 # SQLite databases (runtime artifacts)
 *.db
 
+# Internal research / notes (not for distribution)
+ideas for future optimizations/
+docs/rc-internals.md
+docs/plans/
+
 # OS / editor
 **/.DS_Store
 .env

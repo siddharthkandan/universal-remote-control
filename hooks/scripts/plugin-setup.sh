@@ -6,6 +6,16 @@
 set -euo pipefail
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+
+# Prevent concurrent pip installs (multiple SessionStart hooks)
+mkdir -p "$PLUGIN_ROOT/.urc/locks" 2>/dev/null || true
+LOCK_DIR="$PLUGIN_ROOT/.urc/locks/pip-install"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "Another pip install in progress, skipping" >&2
+    exit 0
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+
 VENV_DIR="$PLUGIN_ROOT/.venv"
 
 # Skip if venv already exists and has dependencies

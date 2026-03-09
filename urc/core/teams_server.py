@@ -249,7 +249,7 @@ def team_task_update(task_id: int, status: Optional[str] = None,
 def team_task_list(team_name: str) -> list:
     """List all tasks for a team with dependency info."""
     try:
-        return _with_inbox_hint(tp.team_task_list(team_name))
+        return tp.team_task_list(team_name)
     except Exception as e:
         return [{"error": str(e), "tool": "team_task_list"}]
 
@@ -319,7 +319,7 @@ def team_auto_escalate(team_name: str) -> dict:
 
 def _run_self_test():
     """Smoke test all protocol functions with an in-memory DB and temp teams dir."""
-    from urc.core.coordination_db import get_connection, init_schema, register_agent
+    from urc.core.db import get_connection, init_schema, register_agent
 
     # Set up in-memory DB
     conn = get_connection(":memory:")

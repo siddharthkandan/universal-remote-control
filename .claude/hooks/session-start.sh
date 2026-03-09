@@ -20,18 +20,22 @@ _SAFE_PANE="${TMUX_PANE:-unknown}"
 echo "$$" > "$PROJECT_DIR/.urc/pids/${_SAFE_PANE#%}.pid" 2>/dev/null || true
 
 # Register agent via SQLite
+_CLI_TYPE="claude-code"
+_PANE_CLI=$(tmux display-message -t "${TMUX_PANE:-}" -p '#{@urc_cli}' 2>/dev/null || true)
+[ -n "$_PANE_CLI" ] && _CLI_TYPE="$_PANE_CLI"
+export URC_CLI_TYPE="$_CLI_TYPE"
+
 URC_PROJECT_DIR="$PROJECT_DIR" URC_HOOK_PID="$$" python3 - <<'PY' 2>/dev/null || true
 import sys, os
 project_dir = os.environ.get('URC_PROJECT_DIR', '.')
 hook_pid = int(os.environ.get('URC_HOOK_PID', '0'))
 sys.path.insert(0, project_dir)
-from urc.core.coordination_db import get_connection, init_schema, register_agent
-from urc.core.jsonl_recovery import append_log
+from urc.core.db import get_connection, init_schema, register_agent
 conn = get_connection(os.path.join(project_dir, '.urc', 'coordination.db'))
 init_schema(conn)
 pane = os.environ.get('TMUX_PANE', 'unknown')
-register_agent(conn, pane, 'claude-code', 'claude', hook_pid)
-append_log('register', pane, {'cli': 'claude-code', 'role': 'claude', 'pid': hook_pid})
+cli_type = os.environ.get('URC_CLI_TYPE', 'claude-code')
+register_agent(conn, pane, cli_type, 'claude', hook_pid)
 conn.close()
 PY
 

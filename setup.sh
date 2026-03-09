@@ -85,12 +85,12 @@ else
   ERRORS=$((ERRORS + 1))
 fi
 
-# -- jq (required by observer.sh and hook scripts) ------------------
+# -- jq (required by hook scripts) ----------------------------------
 if command -v jq &>/dev/null; then
   JQ_VER=$(jq --version 2>/dev/null || echo "unknown")
   ok "jq ($JQ_VER)"
 else
-  fail "jq not found (required by observer.sh and hook scripts)"
+  fail "jq not found (required by hook scripts)"
   echo "     macOS: brew install jq"
   echo "     Linux: apt install jq"
   ERRORS=$((ERRORS + 1))
@@ -135,8 +135,16 @@ ok "All preflight checks passed"
 echo ""
 
 # -- Signal directories for turn-completion hooks --------------------
-mkdir -p "$SCRIPT_DIR/.urc/signals"
-ok ".urc/signals/ directory ready"
+mkdir -p "$SCRIPT_DIR/.urc/signals" \
+         "$SCRIPT_DIR/.urc/responses" \
+         "$SCRIPT_DIR/.urc/streams" \
+         "$SCRIPT_DIR/.urc/seq" \
+         "$SCRIPT_DIR/.urc/locks" \
+         "$SCRIPT_DIR/.urc/timeout" \
+         "$SCRIPT_DIR/.urc/reply_to" \
+         "$SCRIPT_DIR/.urc/inbox" \
+         "$SCRIPT_DIR/.urc/logs"
+ok ".urc/ directories ready (signals, responses, streams, seq, locks, timeout, reply_to, inbox, logs)"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════
@@ -152,7 +160,7 @@ if [[ -d "$VENV_DIR" && -x "$VENV_DIR/bin/python3" ]]; then
 else
   info "Creating virtual environment..."
   VENV_ERR=$(mktemp /tmp/urc-venv-err.XXXXXX)
-  trap "rm -f '$VENV_ERR'" EXIT
+  trap 'rm -f "$VENV_ERR"' EXIT
   if ! "$PYTHON_CMD" -m venv "$VENV_DIR" 2>"$VENV_ERR"; then
     fail "Failed to create virtual environment"
     if grep -qi "externally-managed" "$VENV_ERR" 2>/dev/null; then
@@ -222,12 +230,7 @@ else
   "mcpServers": {
     "urc-coordination": {
       "command": ".venv/bin/python3",
-      "args": ["urc/core/coordination_server.py"],
-      "env": { "PYTHONPATH": "." }
-    },
-    "urc-teams": {
-      "command": ".venv/bin/python3",
-      "args": ["urc/core/teams_server.py"],
+      "args": ["urc/core/server.py"],
       "env": { "PYTHONPATH": "." }
     }
   }
@@ -251,7 +254,7 @@ developer_instructions = "You are part of the URC multi-CLI system. See AGENTS.m
 sandbox_mode = "workspace-write"
 # Required for RC Bridge: dispatched messages must execute without interactive approval prompts
 approval_policy = "never"
-notify = ["bash", "__PROJECT_ROOT__/urc/core/turn-complete-hook.sh"]
+notify = ["bash", "__PROJECT_ROOT__/urc/core/hook.sh"]
 
 [sandbox_workspace_write]
 network_access = false
@@ -263,17 +266,11 @@ persistence = "save-all"
 # ── MCP Servers ──────────────────────────────────────────────────────
 [mcp_servers.urc-coordination]
 command = ".venv/bin/python3"
-args = ["urc/core/coordination_server.py"]
+args = ["urc/core/server.py"]
 
 [mcp_servers.urc-coordination.env]
 PYTHONPATH = "."
 
-[mcp_servers.urc-teams]
-command = ".venv/bin/python3"
-args = ["urc/core/teams_server.py"]
-
-[mcp_servers.urc-teams.env]
-PYTHONPATH = "."
 CODEXEOF
     # Inject absolute path for hook command (heredoc can't expand variables)
     sed -i.bak "s|__PROJECT_ROOT__|$SCRIPT_DIR|g" "$CODEX_TOML" && rm -f "$CODEX_TOML.bak"
@@ -317,21 +314,26 @@ if [[ $HAS_GEMINI -eq 1 ]]; then
   "experimental": {
     "enableAgents": true
   },
-  "tools": {
-    "mcpServers": {
-      "urc_coordination": {
-        "command": ".venv/bin/python3",
-        "args": ["urc/core/coordination_server.py"],
-        "env": { "PYTHONPATH": "." }
-      },
-      "urc_teams": {
-        "command": ".venv/bin/python3",
-        "args": ["urc/core/teams_server.py"],
-        "env": { "PYTHONPATH": "." }
-      }
-    }
+  "mcpServers": {
+    "urc_coordination": {
+      "command": ".venv/bin/python3",
+      "args": ["urc/core/server.py"],
+      "env": { "PYTHONPATH": "." }
+    },
   },
   "hooks": {
+    "BeforeAgent": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "inbox-inject",
+            "type": "command",
+            "command": "bash __PROJECT_ROOT__/.gemini/hooks/inbox-inject.sh"
+          }
+        ]
+      }
+    ],
     "AfterAgent": [
       {
         "matcher": "*",
@@ -339,7 +341,7 @@ if [[ $HAS_GEMINI -eq 1 ]]; then
           {
             "name": "turn-signal",
             "type": "command",
-            "command": "bash __PROJECT_ROOT__/urc/core/turn-complete-hook.sh"
+            "command": "bash __PROJECT_ROOT__/urc/core/hook.sh"
           }
         ]
       }
@@ -350,6 +352,183 @@ GEMINIEOF
     # Inject absolute path for hook command (heredoc can't expand variables)
     sed -i.bak "s|__PROJECT_ROOT__|$SCRIPT_DIR|g" "$GEMINI_JSON" && rm -f "$GEMINI_JSON.bak"
     ok ".gemini/settings.json created for Gemini"
+  fi
+
+  # -- Gemini global policy engine (MCP tool allow rules) ---------------
+  # Gemini CLI uses a policy engine to gate tool access. Without explicit
+  # allow rules, MCP tools are blocked even if the server connects.
+  GEMINI_GLOBAL="$HOME/.gemini/settings.json"
+  if [[ -f "$GEMINI_GLOBAL" ]] && grep -q '"allowed"' "$GEMINI_GLOBAL" 2>/dev/null; then
+    echo ""
+    warn "~/.gemini/settings.json contains a tools.allowed whitelist"
+    echo ""
+    echo "     This deprecated setting blocks MCP tools not in the list."
+    echo "     Remove the ${BOLD}\"tools\"${RESET} block from ~/.gemini/settings.json"
+    echo "     or add all URC MCP tools to the allowed list."
+    echo ""
+  fi
+
+  GEMINI_POLICY_DIR="$HOME/.gemini/policies"
+  GEMINI_URC_POLICY="$GEMINI_POLICY_DIR/urc-mcp.toml"
+  if [[ -d "$GEMINI_POLICY_DIR" ]]; then
+    if [[ -f "$GEMINI_URC_POLICY" ]]; then
+      ok "Gemini MCP policy rules already exist at ~/.gemini/policies/urc-mcp.toml"
+    else
+      info "Adding Gemini policy engine rules for URC MCP tools..."
+      cat > "$GEMINI_URC_POLICY" << 'POLICYEOF'
+# URC MCP tool allow rules — generated by setup.sh
+# These rules let Gemini agents use URC coordination and teams tools.
+
+# ── Coordination server (11 tools) ──
+[[rule]]
+toolName = "mcp__urc_coordination__register_agent"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__heartbeat"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__send_message"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__receive_messages"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__get_fleet_status"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__rename_agent"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__dispatch_to_pane"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__read_pane_output"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__kill_pane"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__cancel_dispatch"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_coordination__bootstrap_validate"
+decision = "allow"
+priority = 100
+
+# ── Teams server (17 tools) ──
+[[rule]]
+toolName = "mcp__urc_teams__team_create"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_delete"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_add_member"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_remove_member"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_status"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_list"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_send"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_inbox"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_broadcast"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_task_create"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_task_update"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_task_list"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_complete"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_idle"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_check_stale"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_retry_wake"
+decision = "allow"
+priority = 100
+
+[[rule]]
+toolName = "mcp__urc_teams__team_auto_escalate"
+decision = "allow"
+priority = 100
+POLICYEOF
+      ok "Gemini policy rules created at ~/.gemini/policies/urc-mcp.toml (28 tools)"
+    fi
+  else
+    echo ""
+    info "Gemini policy engine not detected (~/.gemini/policies/ not found)"
+    echo "     If Gemini MCP tools don't appear, create the directory and re-run setup:"
+    echo "     mkdir -p ~/.gemini/policies && ./setup.sh"
+    echo ""
   fi
 fi
 
@@ -363,7 +542,7 @@ echo ""
 
 info "Testing coordination server imports..."
 if PYTHONPATH="$SCRIPT_DIR" "$VENV_DIR/bin/python3" -c \
-  "from urc.core import coordination_db, coordination_server; print('Server imports OK')" 2>/dev/null; then
+  "from urc.core import db, server; print('Server imports OK')" 2>/dev/null; then
   ok "Coordination server imports verified"
 else
   warn "Coordination server import check failed — server may still work via MCP"
@@ -371,7 +550,7 @@ fi
 
 info "Running coordination server self-test..."
 if PYTHONPATH="$SCRIPT_DIR" "$VENV_DIR/bin/python3" \
-  "$SCRIPT_DIR/urc/core/coordination_server.py" --self-test 2>/dev/null; then
+  "$SCRIPT_DIR/urc/core/server.py" --self-test 2>/dev/null; then
   ok "Coordination server self-test passed"
 else
   warn "Coordination server self-test failed — check logs"

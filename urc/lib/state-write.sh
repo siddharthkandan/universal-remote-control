@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # state-write.sh — Unified atomic JSON read-modify-write with POSIX mkdir locking
 #
 # Provides:

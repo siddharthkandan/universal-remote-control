@@ -6,18 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dispatch-watch.sh"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR\"/urc/core/turn-complete-hook.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/inbox-piggyback.sh"
           }
         ]
       }

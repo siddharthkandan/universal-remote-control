@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from urc.core.coordination_db import (
+from urc.core.db import (
     get_connection,
     init_schema,
     execute_with_retry,
@@ -57,10 +57,10 @@ def _validate_pane_id(pane_id: str) -> None:
     if not _PANE_ID_RE.match(pane_id):
         raise ValueError(f"Invalid pane_id: {pane_id!r} — must match %NNN")
 
-# Path to tmux-send-helper.sh — overridable via env for testing
+# Path to send.sh — overridable via env for testing
 _HELPER_PATH = os.environ.get(
     "URC_SEND_HELPER",
-    str(Path(__file__).parent / "tmux-send-helper.sh"),
+    str(Path(__file__).parent / "send.sh"),
 )
 
 MESSAGE_TYPES = frozenset({
@@ -600,10 +600,22 @@ def team_broadcast(from_name: str, team_name: str, msg_type: str,
 
 
 def _ensure_task_columns(conn):
-    """Idempotent migration: add team_name, blocked_by, blocks, description to tasks.
+    """Idempotent migration: create tasks table + add team columns.
 
-    Uses ALTER TABLE ADD COLUMN with try/except for each column.
+    Creates the tasks table if it doesn't exist (db.py doesn't include it),
+    then adds team-specific columns via ALTER TABLE.
     """
+    conn.execute("""CREATE TABLE IF NOT EXISTS tasks (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        title        TEXT NOT NULL,
+        status       TEXT DEFAULT 'pending',
+        claimed_by   TEXT REFERENCES agents(pane_id),
+        priority     INTEGER DEFAULT 0,
+        commit_sha   TEXT,
+        created_at   REAL,
+        claimed_at   REAL,
+        completed_at REAL
+    )""")
     migrations = [
         ("team_name", "TEXT"),
         ("blocked_by", "TEXT DEFAULT '[]'"),
