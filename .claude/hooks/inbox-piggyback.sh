@@ -7,8 +7,8 @@ PANE="${TMUX_PANE:-%unknown}"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 SIGNAL_FILE="$PROJECT_DIR/.urc/inbox/${PANE}.signal"
 
-# Fast path: no signal file = no unread messages. Exit before reading stdin.
-[ -f "$SIGNAL_FILE" ] || exit 0
+# Fast path: no signal file = no unread messages. Drain stdin to avoid EPIPE.
+[ -f "$SIGNAL_FILE" ] || { cat >/dev/null 2>&1; exit 0; }
 
 # Signal exists — consume stdin (required by hook protocol)
 cat >/dev/null
@@ -23,6 +23,7 @@ if ! printf '%s' "$PANE" | grep -qE '^%[0-9]+$'; then
 fi
 
 COUNT=$(sqlite3 "$DB" "
+    PRAGMA busy_timeout=3000;
     SELECT COUNT(*) FROM (
         SELECT id FROM messages WHERE to_pane = '$PANE' AND read = 0
         UNION ALL
@@ -33,9 +34,10 @@ COUNT=$(sqlite3 "$DB" "
             WHERE r.message_id = m.id AND r.pane_id = '$PANE'
         )
     );
-" 2>/dev/null)
+" 2>/dev/null | tail -1)
 
 SENDER=$(sqlite3 "$DB" "
+    PRAGMA busy_timeout=3000;
     SELECT from_pane FROM (
         SELECT id, from_pane FROM messages WHERE to_pane = '$PANE' AND read = 0
         UNION ALL
@@ -46,7 +48,7 @@ SENDER=$(sqlite3 "$DB" "
             WHERE r.message_id = m.id AND r.pane_id = '$PANE'
         )
     ) ORDER BY id DESC LIMIT 1;
-" 2>/dev/null)
+" 2>/dev/null | tail -1)
 
 [ -z "$COUNT" ] || [ "$COUNT" = "0" ] && exit 0
 

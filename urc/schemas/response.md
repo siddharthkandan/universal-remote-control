@@ -19,8 +19,8 @@
 ## Correlation Protocol
 Dispatcher records `dispatch_timestamp` (epoch seconds) BEFORE sending.
 Response file includes `epoch` from the hook (epoch seconds).
-Dispatcher validates `response.epoch > dispatch_timestamp` before accepting.
-If stale (epoch <= dispatch_timestamp), waits for the next signal.
+Dispatcher validates `response.epoch >= dispatch_timestamp` before accepting.
+If stale (epoch < dispatch_timestamp), waits for the next signal.
 
 ## Signal Ordering (non-negotiable)
 1. Write response file (data available)

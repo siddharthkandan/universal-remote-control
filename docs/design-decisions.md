@@ -26,7 +26,14 @@ Read this before modifying `urc/core/` components — especially `send.sh`, `hoo
 ### CLI-Specific
 - **Gemini stdout CRITICAL**: Only `{"continue":true}` on stdout. ALL debug to stderr.
 - **Codex $1 before stdin**: Check `$1` first (Codex passes JSON as arg). If empty, read stdin.
-- **Bootstrap protocol**: `(NNN) CODEX|GEMINI` message format
+- **Bootstrap protocol**: `(NNN) CODEX|GEMINI` format via legacy text bootstrap. Preferred: tmux options pre-set by `urc-spawn.sh` + `/rename` for session naming (no user bubble on phone). Agent lazy-bootstraps on first message by reading `@bridge_target`/`@bridge_cli`.
+
+### Relay Optimization (Phases 1-4, 2026-03-09)
+- **Phase 1 — Bash block reduction**: Plain text output only, no commentary. Anti-commentary rules in agent prompt. Code blocks render as collapsed elements on phone — always plain text.
+- **Phase 2 — Hook-based push reading**: `bridge-push-hook.sh` (UserPromptSubmit) reads push files on wake tokens (`message delivered to %`, `response from %`), returns formatted content via `additionalContext` (`PUSH_DATA:` prefix). Model echoes content as plain text — zero Bash blocks for push reading. Registered in `.claude/settings.json` (project-level), NOT `hooks/hooks.json` (plugin-level) — **plugin hooks don't fire on independent sessions**.
+- **Phase 3 — Wake token redesign**: Changed from `__urc_push__` to descriptive wake tokens: `message delivered to %NNN (cli)` (processing acknowledgment), `response from %NNN (cli) below:` (response ready). DB message attribution via dispatch metadata files `.urc/dispatches/{PANE}.json`.
+- **Phase 4 — Hook-based dispatch**: Bridge push hook extended to handle normal message dispatch. Calls `send.sh`, returns `DISPATCH_OK`/`DISPATCH_FAIL` via `additionalContext`. Model checks `additionalContext` first (route 0) — no double dispatch. `DISPATCH_FAIL` triggers model auto-reconnect with explicit state recovery. No `CLAUDE_CODE_REMOTE` guard — env var not available in hook subprocesses (verified via env dump).
+- **Key finding — `CLAUDE_CODE_REMOTE`**: Documented as available in hooks but NOT actually exported to hook subprocesses. Env vars available in hooks: `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`. No reliable way to distinguish phone vs terminal sessions in hooks.
 
 ### Relay Lifecycle
 - **Respawn threshold**: 25 sends (counter only tracks outgoing, not push/status turns; ~50 total turns)
@@ -36,7 +43,8 @@ Read this before modifying `urc/core/` components — especially `send.sh`, `hoo
 - **Health dashboard**: Relay "status" command shows target alive/dead, relay count N/25, respawn count N/3, last activity.
 - **Gemini auto-reconnect race (known limitation)**: `send.sh` can return `delivered` for a dying pane. Auto-reconnect requires `failed` status. Narrow race window accepted.
 - **No dispatch_async / reply_to**: Cut — zero production callers. Protocol documented in spec for future rebuild.
-- **Dispatch-acknowledged push (2026-03-09)**: When `send.sh` delivers text to a pane with `@bridge_relay`, it writes a `status:"processing"` push file and fires `__urc_push__` to the relay. Gives phone user immediate "message received" visibility. Fixes 4+ minute relay blind spot during Codex tool-call chains (Codex's notify hook only fires with `last-assistant-message` on text output, not during tool execution). No recursion risk — relay panes never have `@bridge_relay`. Skipped for control messages.
+- **Bootstrap elimination (2026-03-09)**: `urc-spawn.sh` pre-sets `@bridge_target`, `@bridge_cli`, `@bridge_relays` on relay pane + `@bridge_relay` on target pane immediately after spawn. Pre-registers relay in coordination DB. Uses `/rename (NNN) CLI_TYPE` to name session (no user bubble on phone). Agent lazy-bootstraps on first message. Legacy text bootstrap `(NNN) CLI_TYPE` kept in agent prompt for backwards compatibility.
+- **Dispatch-acknowledged push (2026-03-09)**: When `send.sh` delivers text to a pane with `@bridge_relay`, it writes a `status:"processing"` push file and fires `__urc_push__` to the relay. Gives phone user immediate "message received" visibility. Fixes 4+ minute relay blind spot during Codex tool-call chains (Codex's notify hook only fires with `last-assistant-message` on text output, not during tool execution). No recursion risk — relay panes never have `@bridge_relay`. Skipped for control messages. Processing push files now include `dispatched_by` attribution read from dispatch metadata (`.urc/dispatches/{PANE}.json`), displayed as `[PROCESSING on %NNN (cli) -- dispatched by %SRC: "msg"]`. Push files are always deleted after hook read (`SHOULD_DELETE=1` unconditional) — both "message delivered" and "response from" wake tokens consume their files atomically via `additionalContext`.
 
 ## Rejected Approaches (2026-03-08 — Enter regression investigation)
 

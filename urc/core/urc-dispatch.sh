@@ -24,7 +24,7 @@ ARG_LOWER=$(echo "$ARG" | tr '[:upper:]' '[:lower:]')
 
 case "$ARG_LOWER" in
   codex)
-    DEDUP="/tmp/urc-dispatch-CODEX.ts"
+    DEDUP="/tmp/urc-dispatch-${UID:-0}-CODEX.ts"
     NOW=$(date +%s)
     if [ -f "$DEDUP" ]; then
       LAST=$(cat "$DEDUP" 2>/dev/null || echo 0)
@@ -38,7 +38,7 @@ case "$ARG_LOWER" in
     echo "{\"status\":\"delegated\",\"cli\":\"CODEX\",\"pid\":$!}"
     ;;
   gemini)
-    DEDUP="/tmp/urc-dispatch-GEMINI.ts"
+    DEDUP="/tmp/urc-dispatch-${UID:-0}-GEMINI.ts"
     NOW=$(date +%s)
     if [ -f "$DEDUP" ]; then
       LAST=$(cat "$DEDUP" 2>/dev/null || echo 0)
@@ -67,25 +67,26 @@ case "$ARG_LOWER" in
     elif echo "$CMD" | grep -qi gemini; then
       CLI=GEMINI
     else
-      # Fallback: check DB
-      CLI=$("$URC_ROOT/.venv/bin/python3" -c "
-import sqlite3
-db = sqlite3.connect('$URC_ROOT/.urc/coordination.db')
-row = db.execute('SELECT cli FROM agents WHERE pane_id=?',('$PANE',)).fetchone()
+      # Fallback: check DB (pass paths via env to avoid string injection)
+      CLI=$(URC_DB="$URC_ROOT/.urc/coordination.db" URC_PANE="$PANE" "$URC_ROOT/.venv/bin/python3" -c '
+import os, sqlite3
+db = sqlite3.connect(os.environ["URC_DB"])
+db.execute("PRAGMA busy_timeout=2000")
+row = db.execute("SELECT cli FROM agents WHERE pane_id=?",(os.environ["URC_PANE"],)).fetchone()
 db.close()
 if row:
     c = row[0].lower()
-    if 'codex' in c: print('CODEX')
-    elif 'gemini' in c: print('GEMINI')
-    else: print('UNKNOWN')
-else: print('UNKNOWN')
-" 2>/dev/null)
+    if "codex" in c: print("CODEX")
+    elif "gemini" in c: print("GEMINI")
+    else: print("UNKNOWN")
+else: print("UNKNOWN")
+' 2>/dev/null)
       if [ "$CLI" = "UNKNOWN" ]; then
         echo "{\"status\":\"error\",\"error\":\"can't detect CLI type for $PANE\"}"
         exit 1
       fi
     fi
-    DEDUP="/tmp/urc-dispatch-bridge-${PANE}.ts"
+    DEDUP="/tmp/urc-dispatch-${UID:-0}-bridge-${PANE}.ts"
     NOW=$(date +%s)
     if [ -f "$DEDUP" ]; then
       LAST=$(cat "$DEDUP" 2>/dev/null || echo 0)

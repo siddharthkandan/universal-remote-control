@@ -45,6 +45,12 @@ if [ ! -f "$CONFIG" ]; then
     exit 0
 fi
 
+# ── Check enabled flag ────────────────────────────────────────────
+ENABLED=$(jq -r 'if .enabled == false then "false" else "true" end' "$CONFIG" 2>/dev/null)
+if [ "$ENABLED" = "false" ]; then
+    exit 0  # Relay disabled — pass through to Claude
+fi
+
 # Look up target pane
 if [ "$CLI_KEY" = "default" ]; then
     DEFAULT_KEY=$(jq -r '.default // empty' "$CONFIG" 2>/dev/null)
@@ -114,7 +120,7 @@ if [ -n "$PANE" ]; then
 fi
 
 # ── Dual-mode response ────────────────────────────────────────────
-if [ -n "${CLAUDE_REMOTE_SESSION:-}" ]; then
+if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ]; then
     # Phone/remote: inject via additionalContext (Claude sees it, echoes it)
     ESCAPED=$(printf '%s' "$DISPLAY" | jq -Rs .)
     printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}' "$ESCAPED"

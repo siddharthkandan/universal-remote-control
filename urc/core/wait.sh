@@ -24,10 +24,14 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 RESPONSE_FILE="$PROJECT_ROOT/.urc/responses/${PANE}.json"
 SIGNAL_FILE="$PROJECT_ROOT/.urc/signals/done_${PANE}"
+CANCEL_SENTINEL="$PROJECT_ROOT/.urc/signals/cancel_${PANE}"
 TIMEOUT_SENTINEL="$PROJECT_ROOT/.urc/timeout/${PANE}"
 WAIT_CHANNEL="urc_done_${PANE}"
 
 mkdir -p "$PROJECT_ROOT/.urc/responses" "$PROJECT_ROOT/.urc/signals" "$PROJECT_ROOT/.urc/timeout"
+
+# Clear any stale cancel sentinel from a prior cancelled dispatch
+rm -f "$CANCEL_SENTINEL"
 
 DISPATCH_TS="${DISPATCH_TS_ARG:-$(date +%s)}"
 # Don't clear signal file — epoch check handles staleness.
@@ -50,8 +54,8 @@ _try_read_response() {
     now=$(date +%s); latency=$((now - DISPATCH_TS))
     rm -f "$SIGNAL_FILE" "$TIMEOUT_SENTINEL"
     jq -n --arg status "completed" --arg response "$text" \
-          --arg cli "$cli" --argjson latency_s "$latency" \
-          '{status:$status, response:$response, cli:$cli, latency_s:$latency_s}'
+          --arg pane "$PANE" --arg cli "$cli" --argjson latency_s "$latency" \
+          '{status:$status, response:$response, pane:$pane, cli:$cli, latency_s:$latency_s}'
     exit 0
 }
 
@@ -61,7 +65,7 @@ SELFWAKE_PID=""
 _cleanup() {
     [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null; wait "$WATCHDOG_PID" 2>/dev/null
     [ -n "$SELFWAKE_PID" ] && kill "$SELFWAKE_PID" 2>/dev/null; wait "$SELFWAKE_PID" 2>/dev/null
-    rm -f "$TIMEOUT_SENTINEL"
+    rm -f "$TIMEOUT_SENTINEL" "$CANCEL_SENTINEL"
 }
 trap _cleanup EXIT
 
@@ -72,7 +76,9 @@ trap _cleanup EXIT
 WATCHDOG_PID=$!
 
 # Self-wake: periodic re-signal closes hook-before-wait race (max 2s latency)
-( while true; do sleep 2; tmux wait-for -S "$WAIT_CHANNEL" 2>/dev/null; done ) >/dev/null 2>&1 &
+# Bounded by TIMEOUT+10s to prevent orphan processes if parent is SIGKILL'd
+_SW_LIMIT=$((TIMEOUT + 10))
+( _sw_end=$(($(date +%s) + _SW_LIMIT)); while [ "$(date +%s)" -lt "$_sw_end" ]; do sleep 2; tmux wait-for -S "$WAIT_CHANNEL" 2>/dev/null; done ) >/dev/null 2>&1 &
 SELFWAKE_PID=$!
 
 # ── Main loop ────────────────────────────────────────────────────
@@ -83,7 +89,15 @@ while true; do
     # Signal file persists on disk — hook already fired, re-check
     [ -f "$SIGNAL_FILE" ] && continue
 
-    # (b) Timeout?
+    # (b) Cancelled by cancel_dispatch?
+    if [ -f "$CANCEL_SENTINEL" ]; then
+        rm -f "$CANCEL_SENTINEL"
+        jq -n --arg status "cancelled" --arg pane "$PANE" \
+              '{status:$status, pane:$pane}'
+        exit 1
+    fi
+
+    # (c) Timeout?
     if [ -f "$TIMEOUT_SENTINEL" ]; then
         _try_read_response || true   # last-chance: hook may have fired between (a) and (b)
         captured=$(tmux capture-pane -t "$PANE" -p -S -40 2>/dev/null || true)

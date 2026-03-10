@@ -59,7 +59,7 @@ From Claude Code (not from inside Codex/Gemini):
 /urc codex
 ```
 
-This spawns a Codex pane, launches a Haiku relay pane, bootstraps the bridge,
+This spawns a Codex pane, launches a Haiku relay pane, configures the bridge,
 and activates Remote Control. Your phone now controls Codex.
 
 ## Bridge a Gemini Pane
@@ -87,10 +87,10 @@ You can also initiate bridges from inside the target CLI:
 1. `/urc` spawns a Haiku relay pane running the `rc-bridge` agent
 2. The relay connects to your phone via Remote Control (`/remote-control`)
 3. You type a message on your phone
-4. The relay calls `bash urc/core/send.sh "%TARGET" "message"` (fire-and-forget, returns in <2s)
-5. The relay shows "Sent to %TARGET (CLI_TYPE)"
-6. When the target completes its turn, `hook.sh` pushes the response back to the relay via `__urc_push__`
-7. The relay displays the output verbatim on your phone
+4. A `UserPromptSubmit` hook (`bridge-push-hook.sh`) dispatches your message via `send.sh` — no model turn consumed
+5. The hook also reads any pending push files and returns responses via `additionalContext`
+6. When the target completes its turn, `hook.sh` captures the response and writes a push file
+7. The relay picks up the response on its next wake and displays it verbatim on your phone
 
 The bridge is stateless — `/clear` is safe. State lives in tmux pane options.
 

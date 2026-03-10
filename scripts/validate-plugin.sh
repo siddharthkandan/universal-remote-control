@@ -109,10 +109,10 @@ else
   fail "agents/rc-bridge.md missing"
 fi
 
-if [[ -f skills/rc-any/SKILL.md ]]; then
-  pass "skills/rc-any/SKILL.md found"
+if [[ -f skills/urc/SKILL.md ]]; then
+  pass "skills/urc/SKILL.md found"
 else
-  fail "skills/rc-any/SKILL.md missing"
+  fail "skills/urc/SKILL.md missing"
 fi
 
 echo ""

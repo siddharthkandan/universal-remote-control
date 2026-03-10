@@ -21,9 +21,10 @@
 - Coordination server: `urc/core/server.py` (11 MCP tools)
 - Teams protocol: `urc/core/teams_protocol.py` (DORMANT — removed from .mcp.json)
 - Teams MCP server: `urc/core/teams_server.py` (DORMANT — removed from .mcp.json)
-- RC Bridge agent: `.claude/agents/rc-bridge.md` (Haiku passthrough — async send.sh + `__urc_push__` response delivery)
-- URC Spawn script: `urc/core/urc-spawn.sh` (fire-and-forget bash spawner, ~20s)
-- RC Bridge skill: `.claude/skills/rc-any/SKILL.md` (thin dispatcher → runs urc-spawn.sh in background)
+- RC Bridge agent: `.claude/agents/rc-bridge.md` (Haiku passthrough — hook-based dispatch + push reading via `additionalContext`, Bash fallback for terminal/error paths)
+- Bridge push hook: `hooks/scripts/bridge-push-hook.sh` (UserPromptSubmit — dispatches messages via send.sh, reads push files, returns via `additionalContext`. Registered in `.claude/settings.json`, NOT plugin hooks — project-level hooks fire on independent sessions, plugin hooks do NOT)
+- URC Spawn script: `urc/core/urc-spawn.sh` (fire-and-forget bash spawner — pre-sets tmux state + DB registration, `/rename` for session naming, no text bootstrap)
+- RC Bridge skill: `.claude/skills/urc/SKILL.md` (thin dispatcher → runs urc-spawn.sh in background)
 - CLI adapter: `urc/core/cli-adapter.sh` (CLI-specific field mapping)
 - Dispatch composite: `urc/core/dispatch-and-wait.sh` (atomic dispatch + wait + read)
 - Response schema: `urc/schemas/response.md`
@@ -62,10 +63,10 @@ See [AGENTS.md](AGENTS.md#cross-pane-communication) for the full cross-pane prot
 
 **Synchronous dispatch (for cross-pane work, NOT used by relay):**
 - `bash urc/core/dispatch-and-wait.sh "%TARGET" "message" 120` — atomic dispatch + wait + read
-- Note: The RC Bridge relay uses async send.sh (fire-and-forget) + `__urc_push__` for response delivery. Only non-relay dispatchers use synchronous dispatch.
+- Note: The RC Bridge relay uses hook-based dispatch (bridge-push-hook.sh returns `DISPATCH_OK`/`DISPATCH_FAIL` via `additionalContext`) + push reading via the same hook (`PUSH_DATA:` in `additionalContext`). Bash fallback exists for error recovery and terminal sessions. Only non-relay dispatchers use synchronous dispatch.
 - Timeout guidance: 60s for simple questions, 120s (default) for most tasks, 180-300s for complex analysis
 - Returns structured JSON: `{status, response, pane, cli, latency_s}`
-- Status: `completed` or `timeout`
+- Status: `completed`, `timeout`, `busy` (another dispatch holds the per-pane lock), or `circuit_open` (too many recent failures)
 
 **Fire-and-forget (one-way injection):**
 - `dispatch_to_pane(pane_id, message)` — send to a pane, returns `delivered` or `failed`. Sequential calls to same pane are in order; different panes run in parallel.
@@ -85,17 +86,23 @@ See [AGENTS.md](AGENTS.md#cross-pane-communication) for the full cross-pane prot
 {"status":"timeout","captured":"last 40 lines of pane output..."}
 ```
 
-**`notify` default:** `notify=true` is recommended for all interactive messaging. `notify=false`: use when storing a message for later retrieval (logging, batch collection) without interrupting the recipient. If `send_message` returns `wake: "failed"`, no action needed — the message is stored and the recipient discovers it via inbox hooks on their next turn.
+**`notify` default:** `notify=true` is recommended for all interactive messaging. `notify=false`: use when storing a message for later retrieval (logging, batch collection) without interrupting the recipient. If `send_message` returns `wake_status: "failed"`, no action needed — the message is stored and the recipient discovers it via inbox hooks on their next turn.
 
 **`get_fleet_status` return:**
 ```json
-[{"pane_id":"%1320","cli":"claude","status":"active","label":"spec-writer","alive":true}, ...]
+{"agents":[{"pane_id":"%1320","cli":"claude","status":"active","label":"spec-writer","alive":true}, ...],"count":N}
 ```
 
 **Message size limits:**
 - `dispatch_to_pane` / `dispatch-and-wait.sh`: text goes through tmux paste-buffer. Keep under **1000 chars**. 1000-3000 chars usually works but is not guaranteed; over 3000 risks silent truncation.
-- `send_message` (DB): no size limit (SQLite). Wake nudge text has the same ~1000 char paste-buffer limit.
-- For long content: write to `.urc/handoff-{FROM}-to-{TO}.md` and dispatch a short reference. Sender creates; recipient deletes after reading.
+- `send_message` (DB): 100KB body limit. Wake nudge text has the same ~1000 char paste-buffer limit.
+- For long content: write to `.urc/handoff-{FROM}-to-{TO}.md` and send a short reference via `send_message(from, to, "Report ready at .urc/handoff-X-to-Y.md — read and delete", notify=true)`. Always use `send_message` (not `dispatch_to_pane`) so the recipient gets a wake nudge. Sender creates; recipient deletes after reading.
+
+**How to send results back to another agent:**
+1. **Short results (<1000 chars):** `send_message(from_pane=YOUR_PANE, to_pane=TARGET, body="your results", notify=true)`
+2. **Long results (>1000 chars):** Write to `.urc/handoff-{FROM}-to-{TO}.md`, then `send_message` with a short reference pointing to the file.
+3. **If `wake` returns `"failed"`:** The message IS stored in the DB — the recipient discovers it via inbox hooks on their next turn. No retry needed. Do NOT fall back to `dispatch_to_pane` for messaging.
+4. **Never use `dispatch_to_pane` for "please read and respond" patterns** — it's fire-and-forget injection with no inbox storage.
 
 **Pane lookup costs:**
 - **Pane alive?** `tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -q '%NNN'` (~50 tokens)
@@ -130,8 +137,10 @@ Type `>codex: your message` or `>gemini: your message` to relay directly to a ta
 | Turn completion hook | `urc/core/hook.sh` |
 | Response file schema | `urc/schemas/response.md` |
 | RC Bridge agent | `.claude/agents/rc-bridge.md` |
+| Bridge push hook (dispatch + push reading) | `hooks/scripts/bridge-push-hook.sh` |
+| Project-level hook registration | `.claude/settings.json` |
 | URC Spawn script (fire-and-forget) | `urc/core/urc-spawn.sh` |
-| RC Bridge skill (thin dispatcher) | `.claude/skills/rc-any/SKILL.md` |
+| RC Bridge skill (thin dispatcher) | `.claude/skills/urc/SKILL.md` |
 | Inbox piggyback (Claude) | `.claude/hooks/inbox-piggyback.sh` |
 | Inbox watcher (Layer 5) | `urc/core/inbox-watcher.sh` |
 | Inbox inject (Gemini) | `.gemini/hooks/inbox-inject.sh` |

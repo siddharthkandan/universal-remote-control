@@ -1,6 +1,6 @@
 {
   "name": "urc",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Control Codex and Gemini from your phone. Coordinate AI agents across CLIs via tmux.",
   "author": {
     "name": "Siddharth Kandan"

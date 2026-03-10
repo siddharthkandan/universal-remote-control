@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/hooks/scripts/bridge-push-hook.sh"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "",

@@ -51,9 +51,9 @@ fi
 
 # Single tmux server assertion — pane IDs require single server
 if command -v tmux >/dev/null 2>&1; then
-    _SOCKET_COUNT=$(tmux list-sessions -F '#{socket_path}' 2>/dev/null | sort -u | wc -l | tr -d ' ')
-    if [ "${_SOCKET_COUNT:-0}" -gt 1 ]; then
-        echo "[FATAL] Multiple tmux sockets detected ($_SOCKET_COUNT). Pane-based identity requires single server." >&2
+    _SERVER_COUNT=$(pgrep -c "tmux: server" 2>/dev/null || echo "1")
+    if [ "${_SERVER_COUNT:-0}" -gt 1 ]; then
+        echo "[FATAL] Multiple tmux servers detected ($_SERVER_COUNT). Pane-based identity requires single server." >&2
     fi
 fi
 

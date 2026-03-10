@@ -9,9 +9,9 @@ The RC Bridge makes this Gemini pane controllable from the Claude Code phone app
 
 **How it works:**
 1. A Claude Code relay pane runs the `rc-bridge` agent (Haiku model)
-2. It's bootstrapped with `(NNN) GEMINI` where NNN is this pane's ID
+2. It's pre-configured with target pane ID and CLI type via tmux pane options (set by `urc-spawn.sh`)
 3. State is stored in tmux pane options (`@bridge_target`, `@bridge_cli`, `@bridge_relays`)
-4. Phone message -> relay dispatches to this pane via `send.sh` (fire-and-forget) -> your response is pushed back to the relay via `__urc_push__` -> displayed verbatim on phone
+4. Phone message -> relay hook dispatches to this pane via `send.sh` -> your response is captured by `hook.sh` and written to a push file -> relay picks it up on next wake and displays it verbatim on phone
 
 **Launch:** Use `/rc` command in this Gemini pane, or `/rc-bridge gemini` from Claude Code.
 
@@ -88,7 +88,7 @@ The recipient will be notified automatically via their CLI's inbox hook. With `n
 
 **Discover all agents:** `mcp__urc_coordination__get_fleet_status()` (~15.9K tokens) — only for fleet-wide discovery, orphan scans, or when you need agent metadata (cli, role, status, context%).
 ```json
-[{"pane_id":"%1320","cli":"claude","status":"active","label":"spec-writer","alive":true}, ...]
+{"agents":[{"pane_id":"%1320","cli":"claude","status":"active","label":"spec-writer","alive":true}, ...],"count":N}
 ```
 **Do NOT call `get_fleet_status` before launching Agent Teams** — those are new subprocesses that don't exist in the fleet yet.
 
@@ -96,7 +96,7 @@ The recipient will be notified automatically via their CLI's inbox hook. With `n
 
 **Message size limits:**
 - `dispatch_to_pane` / `dispatch-and-wait.sh`: text goes through tmux paste-buffer. Keep under **1000 chars**. 1000-3000 chars usually works but is not guaranteed; over 3000 risks silent truncation.
-- `send_message` (DB): no size limit (stored in SQLite). But the wake nudge text goes through tmux paste-buffer, so the nudge itself has the same limits.
+- `send_message` (DB): 100KB body limit. But the wake nudge text goes through tmux paste-buffer, so the nudge itself has the same limits.
 - For long content: write to `.urc/handoff-{FROM}-to-{TO}.md` (strip `%` from pane IDs) and dispatch a short reference like `"Read .urc/handoff-896-to-906.md"`. Sender creates; recipient deletes after reading.
 
 **Read what another pane is showing (MCP preferred, shell fallback):**
@@ -153,7 +153,7 @@ Redirect output to temp files — without redirection, JSON results are interlea
 {"status":"timeout","captured":"last 40 lines of pane output..."}
 ```
 
-**`notify` default:** `notify=true` is recommended for all interactive messaging. `notify=false`: use when storing a message for later retrieval (logging, batch collection) without interrupting the recipient. If `send_message` returns `wake: "failed"`, no action needed — the message is stored and the recipient discovers it via inbox hooks on their next turn.
+**`notify` default:** `notify=true` is recommended for all interactive messaging. `notify=false`: use when storing a message for later retrieval (logging, batch collection) without interrupting the recipient. If `send_message` returns `wake_status: "failed"`, no action needed — the message is stored and the recipient discovers it via inbox hooks on their next turn.
 
 **`receive_messages` behavior:** Marks messages as read atomically — calling it twice returns nothing on the second call. Messages are ordered by DB insert time (FIFO).
 

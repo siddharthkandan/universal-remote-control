@@ -24,7 +24,7 @@ detect_cli() {
   if [ -f "$_CLI_ADAPTER_DB" ]; then
     local db_cli
     db_cli=$(sqlite3 "$_CLI_ADAPTER_DB" \
-      "SELECT cli FROM agents WHERE pane_id='${pane}' LIMIT 1;" 2>/dev/null || true)
+      "PRAGMA busy_timeout=3000; SELECT cli FROM agents WHERE pane_id='${pane}' LIMIT 1;" 2>/dev/null | tail -1 || true)
     if [ -n "$db_cli" ]; then
       case "$db_cli" in
         *claude*) echo "claude"; return 0 ;;

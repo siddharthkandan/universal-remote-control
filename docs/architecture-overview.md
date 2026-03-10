@@ -13,7 +13,7 @@ and **Cross-CLI Communication** (structured messaging between Claude, Codex, and
         |  Remote Control
         v
   Haiku Relay (rc-bridge agent)
-        |  send.sh (fire-and-forget) + __urc_push__ (response delivery)
+        |  hook-based dispatch (send.sh) + push file reading
         v
   +----------------------------------------------------------+
   |  Coordination Server (11 MCP tools, STDIO transport)     |
@@ -62,20 +62,20 @@ verbatim, output displayed verbatim.
 **State recovery:** State lives in tmux pane options (`@bridge_target`, `@bridge_cli`,
 `@bridge_relays`, `@bridge_respawns`), not in context. `/clear` is safe.
 
-**Message loop (async):**
-1. `bash urc/core/send.sh "%TARGET" "message"` — fire-and-forget dispatch
-2. Returns instantly with `{status: "delivered"}` or `{status: "failed"}`
-3. Display "Sent to %TARGET (CLI_TYPE)"
-4. Response arrives later via `__urc_push__` (pushed by hook.sh when target completes)
+**Message loop (hook-based):**
+1. Phone message triggers `UserPromptSubmit` hook (`bridge-push-hook.sh`)
+2. Hook dispatches via `send.sh` and returns `DISPATCH_OK` / `DISPATCH_FAIL` via `additionalContext`
+3. Hook also reads any pending push files and returns response via `PUSH_DATA:` in `additionalContext`
+4. Target's `hook.sh` captures its response and writes a push file for the relay to pick up on next wake
 
 **Additional features:**
 - Push attribution: shows who dispatched and what was asked
 - Auto-reconnect: if target dies, spawns replacement (3 attempts max)
 - Health dashboard: "status" command shows target alive/dead, relay count, respawn count
 
-### 3. RC Bridge Skill (`.claude/skills/rc-any/SKILL.md`)
+### 3. RC Bridge Skill (`.claude/skills/urc/SKILL.md`)
 
-Universal launcher for bridge sessions. Invocable as `/rc-bridge`, `/rc-any`, `/rc-relay`.
+Universal launcher for bridge sessions. Invocable as `/urc`, `/rc-bridge`, `/rc-any`, `/rc-relay`.
 
 | Usage | What happens |
 |-------|-------------|

@@ -20,6 +20,7 @@ Usage (self-test):
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -76,12 +77,25 @@ if not _server_pane:
 
 
 def _get_conn():
-    """Return the shared SQLite connection, initializing on first call."""
+    """Return the shared SQLite connection, initializing on first call.
+
+    Includes health check: if the existing connection is broken (e.g. DB
+    corruption, WAL loss), it reconnects instead of failing permanently.
+    """
     global _conn
-    if _conn is None:
-        from urc.core.db import get_connection, init_schema
-        _conn = get_connection()
-        init_schema(_conn)
+    if _conn is not None:
+        try:
+            _conn.execute("SELECT 1")
+            return _conn
+        except Exception:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+            _conn = None
+    from urc.core.db import get_connection, init_schema
+    _conn = get_connection()
+    init_schema(_conn)
     return _conn
 
 
@@ -142,6 +156,10 @@ def _peek_inbox_hint(pane_id: Optional[str] = None) -> Optional[str]:
         msgs = db_recv(conn, pid, mark_read=False)
         count = len(msgs) if msgs else 0
         if count == 0:
+            try:
+                signal.unlink(missing_ok=True)
+            except OSError:
+                pass
             return None
         # Extract sender from most recent message
         latest_sender = msgs[-1]["from_pane"] if msgs else "unknown"
@@ -176,6 +194,16 @@ def _send_to_pane(pane_id: str, message: str) -> dict:
         return {"status": "failed", "pane": pane_id, "error": "send.sh timeout"}
     except (json.JSONDecodeError, Exception) as e:
         return {"status": "failed", "pane": pane_id, "error": str(e)}
+
+
+_PANE_RE = re.compile(r"^%\d+\Z")
+
+
+def _validate_pane_id(pid: str) -> Optional[str]:
+    """Return error string if pane ID is invalid, None if valid."""
+    if not _PANE_RE.match(pid):
+        return f"Invalid pane ID: {pid}"
+    return None
 
 
 def _session_group_check(target_pane: str) -> Optional[str]:
@@ -238,6 +266,9 @@ async def register_agent(
     model: str = "",
 ) -> dict:
     """Register this pane as an agent in the coordination DB."""
+    err = _validate_pane_id(pane_id)
+    if err:
+        return {"error": err, "tool": "register_agent"}
     try:
         from urc.core.db import register_agent as db_register_agent
         conn = _get_conn()
@@ -260,6 +291,9 @@ async def heartbeat(
     context_pct: int = -1,
 ) -> dict:
     """Update heartbeat. Returns inbox hint if messages are waiting."""
+    err = _validate_pane_id(pane_id)
+    if err:
+        return {"error": err, "tool": "heartbeat"}
     try:
         from urc.core.db import update_heartbeat, get_agent
         conn = _get_conn()
@@ -340,6 +374,9 @@ async def get_fleet_status(stale_threshold: int = 3600) -> dict:
 @mcp.tool()
 async def rename_agent(pane_id: str, label: str) -> dict:
     """Set a display label for an agent."""
+    err = _validate_pane_id(pane_id)
+    if err:
+        return {"error": err, "tool": "rename_agent"}
     try:
         from urc.core.db import get_agent, update_agent_label
         conn = _get_conn()
@@ -363,12 +400,15 @@ async def rename_agent(pane_id: str, label: str) -> dict:
 async def dispatch_to_pane(pane_id: str, message: str) -> dict:
     """Send text to a pane via bracketed paste. Fire-and-forget -- does not wait for response.
     For synchronous dispatch-and-wait, use dispatch-and-wait.sh via Bash."""
+    err = _validate_pane_id(pane_id)
+    if err:
+        return {"error": err, "tool": "dispatch_to_pane"}
     _ensure_registered()
     try:
         # Session-group guard
         group_err = _session_group_check(pane_id)
         if group_err:
-            return {"status": "failed", "pane_id": pane_id, "error": group_err}
+            return {"status": "failed", "pane": pane_id, "error": group_err}
 
         # Write dispatch metadata for push attribution (hook.sh reads this)
         dispatch_dir = _URC_DIR / "dispatches"
@@ -419,6 +459,9 @@ async def dispatch_to_pane(pane_id: str, message: str) -> dict:
 @mcp.tool()
 async def read_pane_output(pane_id: str, lines: int = 50) -> dict:
     """Capture visible text from a pane's terminal buffer."""
+    err = _validate_pane_id(pane_id)
+    if err:
+        return {"error": err, "tool": "read_pane_output"}
     try:
         n = min(max(lines, 1), 200)
 
@@ -467,6 +510,15 @@ async def send_message(
 ) -> dict:
     """Store a message in SQLite, signal recipient's inbox. Optionally send tmux wake nudge.
     This is the merged send_message + send_with_notify."""
+    err = _validate_pane_id(from_pane)
+    if err:
+        return {"error": err, "tool": "send_message"}
+    if to_pane != "*":
+        err = _validate_pane_id(to_pane)
+        if err:
+            return {"error": err, "tool": "send_message"}
+    if len(body) > 100_000:
+        return {"error": "body exceeds 100KB limit", "tool": "send_message"}
     _ensure_registered()
     try:
         from urc.core.db import send_message as db_send_message, list_agents
@@ -500,20 +552,31 @@ async def send_message(
             except OSError:
                 pass
 
-        # Fire tmux wait-for for instant inbox notification
-        if notify:
-            for sp in signal_panes:
-                try:
-                    subprocess.run(
-                        ["tmux", "wait-for", "-S", f"urc_inbox_{sp}"],
-                        capture_output=True, timeout=3,
-                    )
-                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                    pass
+        # Write dispatch metadata so hook.sh can attribute the response to the sender
+        if notify and actual_to and actual_to != from_pane:
+            try:
+                dispatch_dir = _URC_DIR / "dispatches"
+                dispatch_dir.mkdir(parents=True, exist_ok=True)
+                import json as _json
+                dispatch_meta = {
+                    "source": from_pane,
+                    "message": body[:100],
+                    "target": actual_to,
+                    "epoch": int(time.time()),
+                    "type": "db_message",
+                }
+                with open(dispatch_dir / f"{actual_to}.json", "w") as f:
+                    _json.dump(dispatch_meta, f)
+            except OSError:
+                pass
 
         # Best-effort wake nudge via send.sh (rate-limited per recipient)
+        # IMPORTANT: Nudge BEFORE wait-for signal. If reversed, wait-for triggers
+        # a model turn (via inbox-watcher), and the nudge arrives during streaming —
+        # Enter gets dropped, nudge text stuck in input field permanently.
         wake_status = None
         wake_error = None
+        nudged_pane = None
         if notify and actual_to and actual_to != from_pane:
             now = time.time()
             last = _last_nudge.get(actual_to, 0)
@@ -530,10 +593,26 @@ async def send_message(
                         _last_nudge[actual_to] = now - _NUDGE_COOLDOWN + _NUDGE_FAIL_COOLDOWN
                     else:
                         _last_nudge[actual_to] = now
+                        nudged_pane = actual_to
                 except Exception as e:
                     wake_status = "failed"
                     wake_error = str(e)
                     _last_nudge[actual_to] = now - _NUDGE_COOLDOWN + _NUDGE_FAIL_COOLDOWN
+
+        # Fire tmux wait-for for instant inbox notification (inbox-watcher Layer 5)
+        # Always fire for ALL signal_panes, even nudged ones. With nudge-first
+        # ordering, wait-for fires after nudge delivery completes — no streaming race.
+        # The redundant wakeup (nudge + wait-for) is harmless and provides backup
+        # notification if the nudge's Enter was dropped by the TUI.
+        if notify:
+            for sp in signal_panes:
+                try:
+                    subprocess.run(
+                        ["tmux", "wait-for", "-S", f"urc_inbox_{sp}"],
+                        capture_output=True, timeout=3,
+                    )
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    pass
 
         result = {"status": "sent", "message_id": msg_id}
         if notify:
@@ -553,6 +632,9 @@ async def send_message(
 @mcp.tool()
 async def receive_messages(pane_id: str, mark_read: bool = True) -> dict:
     """Get unread messages from inbox (direct + broadcasts)."""
+    err = _validate_pane_id(pane_id)
+    if err:
+        return {"error": err, "tool": "receive_messages"}
     try:
         from urc.core.db import receive_messages as db_receive_messages
         conn = _get_conn()
@@ -579,6 +661,9 @@ async def receive_messages(pane_id: str, mark_read: bool = True) -> dict:
 @mcp.tool()
 async def kill_pane(pane_id: str, confirm: bool = False) -> dict:
     """Kill a tmux pane. Requires confirm=True as safety guard."""
+    err = _validate_pane_id(pane_id)
+    if err:
+        return {"error": err, "tool": "kill_pane"}
     try:
         if not confirm:
             return {
@@ -624,22 +709,32 @@ async def kill_pane(pane_id: str, confirm: bool = False) -> dict:
 @mcp.tool()
 async def cancel_dispatch(pane_id: str) -> dict:
     """Emergency: SIGINT the target pane, clear all dispatch signals, unblock any waiting dispatcher."""
+    err = _validate_pane_id(pane_id)
+    if err:
+        return {"error": err, "tool": "cancel_dispatch"}
     try:
+        # Session-group check (same boundary as dispatch_to_pane)
+        group_err = _session_group_check(pane_id)
+        if group_err:
+            return {"status": "failed", "pane": pane_id, "error": group_err}
+
         # Send Ctrl-C to target pane
         subprocess.run(
             ["tmux", "send-keys", "-t", pane_id, "C-c"],
             capture_output=True, timeout=5,
         )
 
-        # Clear signal, timeout, and response files
-        signal_file = _URC_DIR / "signals" / f"done_{pane_id}"
-        timeout_file = _URC_DIR / "timeout" / f"{pane_id}"
-        response_file = _URC_DIR / "responses" / f"{pane_id}.json"
-        for f in [signal_file, timeout_file, response_file]:
-            try:
-                f.unlink(missing_ok=True)
-            except OSError:
-                pass
+        # Write cancellation sentinel (wait.sh checks this to break its loop)
+        cancel_file = _URC_DIR / "signals" / f"cancel_{pane_id}"
+        cancel_file.parent.mkdir(parents=True, exist_ok=True)
+        cancel_file.write_text("cancelled\n")
+
+        # Remove stale dispatch metadata to prevent misattribution on next turn
+        dispatch_meta = _URC_DIR / "dispatches" / f"{pane_id}.json"
+        try:
+            dispatch_meta.unlink(missing_ok=True)
+        except OSError:
+            pass
 
         # Signal the wait-for channel to unblock any waiting dispatcher
         subprocess.run(
@@ -647,9 +742,9 @@ async def cancel_dispatch(pane_id: str) -> dict:
             capture_output=True, timeout=3,
         )
 
-        return {"status": "cancelled", "pane_id": pane_id}
+        return {"status": "cancelled", "pane": pane_id}
     except subprocess.TimeoutExpired:
-        return {"status": "timeout", "pane_id": pane_id, "error": "tmux command timed out"}
+        return {"status": "timeout", "pane": pane_id, "error": "tmux command timed out"}
     except Exception as e:
         return {"error": str(e), "tool": "cancel_dispatch"}
 
@@ -731,7 +826,7 @@ async def bootstrap_validate() -> dict:
         pass
 
     if live_panes:
-        for dirname in ["responses", "signals", "timeout", "reply_to", "streams", "inbox"]:
+        for dirname in ["responses", "signals", "timeout", "reply_to", "streams", "inbox", "dispatches", "circuits", "pids", "pushes"]:
             dirpath = _URC_DIR / dirname
             if not dirpath.is_dir():
                 continue
@@ -779,6 +874,18 @@ async def bootstrap_validate() -> dict:
         else:
             checks["stale_cleanup"] = "ok"
 
+        # Truncate crashes.log if >100KB
+        crashes_log = _URC_DIR / "crashes.log"
+        if crashes_log.is_file():
+            try:
+                if crashes_log.stat().st_size > 100_000:
+                    crashes_log.write_text("")
+                    checks["crashes_log"] = "truncated (>100KB)"
+                else:
+                    checks["crashes_log"] = "ok"
+            except OSError:
+                checks["crashes_log"] = "ok"
+
     # 8. DB reaper: deregister agents whose panes no longer exist
     db_reaped = 0
     if live_panes:
@@ -813,6 +920,11 @@ async def bootstrap_validate() -> dict:
             "DELETE FROM messages WHERE read = 1 AND created_at < datetime('now', '-24 hours')"
         )
         db_purged_messages = cur.rowcount
+        # Purge old broadcast messages (to_pane IS NULL, never marked read)
+        cur2 = conn.execute(
+            "DELETE FROM messages WHERE to_pane IS NULL AND created_at < datetime('now', '-24 hours')"
+        )
+        db_purged_messages += cur2.rowcount
         conn.commit()
     except Exception:
         pass
@@ -869,22 +981,22 @@ def _run_self_test():
         nonlocal passed, failed
 
         # -- Tool 1: register_agent --
-        r = await register_agent(pane_id="%test", cli="claude", role="engineer", model="opus")
+        r = await register_agent(pane_id="%99998", cli="claude", role="engineer", model="opus")
         check("register_agent status", r.get("status") == "registered", str(r))
-        check("register_agent pane_id", r.get("pane_id") == "%test", str(r))
+        check("register_agent pane_id", r.get("pane_id") == "%99998", str(r))
         check("register_agent cli", r.get("cli") == "claude", str(r))
 
-        agent = get_agent(_conn, "%test")
+        agent = get_agent(_conn, "%99998")
         check("register_agent in DB", agent is not None)
 
         # Register a second agent for later tests
-        await register_agent(pane_id="%other", cli="codex", role="worker")
+        await register_agent(pane_id="%99997", cli="codex", role="worker")
 
         # -- Tool 2: heartbeat --
-        r = await heartbeat(pane_id="%test", status="active", context_pct=55)
+        r = await heartbeat(pane_id="%99998", status="active", context_pct=55)
         check("heartbeat status", r.get("status") == "ok", str(r))
 
-        updated = get_agent(_conn, "%test")
+        updated = get_agent(_conn, "%99998")
         check("heartbeat context_pct", updated["context_pct"] == 55, str(updated["context_pct"]))
 
         # -- Tool 3: get_fleet_status --
@@ -893,7 +1005,7 @@ def _run_self_test():
         check("get_fleet_status count", r.get("count", 0) >= 2, str(r))
 
         # -- Tool 4: rename_agent --
-        r = await rename_agent(pane_id="%test", label="relay-for-codex")
+        r = await rename_agent(pane_id="%99998", label="relay-for-codex")
         check("rename_agent status", r.get("status") == "renamed", str(r))
         check("rename_agent label", r.get("label") == "relay-for-codex", str(r))
 
@@ -901,33 +1013,33 @@ def _run_self_test():
         check("rename_agent missing agent", "error" in r_bad, str(r_bad))
 
         # -- Tool 5: dispatch_to_pane (tmux-dependent, test graceful failure) --
-        r = await dispatch_to_pane(pane_id="%nonexistent_test_pane", message="hello")
+        r = await dispatch_to_pane(pane_id="%99996", message="hello")
         check("dispatch_to_pane returns dict", isinstance(r, dict), str(r))
         check("dispatch_to_pane has status", "status" in r or "error" in r, str(r))
 
         # -- Tool 6: read_pane_output (tmux-dependent, test graceful failure) --
-        r = await read_pane_output(pane_id="%nonexistent_test_pane", lines=5)
+        r = await read_pane_output(pane_id="%99996", lines=5)
         check("read_pane_output returns dict", isinstance(r, dict), str(r))
 
         # -- Tool 7: send_message (direct) --
-        r = await send_message(from_pane="%test", to_pane="%other", body="Hello", notify=False)
+        r = await send_message(from_pane="%99998", to_pane="%99997", body="Hello", notify=False)
         check("send_message status", r.get("status") == "sent", str(r))
         check("send_message has message_id", "message_id" in r, str(r))
 
         # -- Tool 7b: send_message (broadcast) --
-        r = await send_message(from_pane="%test", to_pane="*", body="Broadcast!", notify=False)
+        r = await send_message(from_pane="%99998", to_pane="*", body="Broadcast!", notify=False)
         check("send_message broadcast", r.get("status") == "sent", str(r))
 
         # -- Tool 7c: send_message with notify (rate-limiting) --
         _last_nudge.clear()  # reset rate-limit state
-        r = await send_message(from_pane="%test", to_pane="%other", body="Nudge1", notify=True)
+        r = await send_message(from_pane="%99998", to_pane="%99997", body="Nudge1", notify=True)
         check("send_message notify has wake_status", "wake_status" in r, str(r))
 
-        r2 = await send_message(from_pane="%test", to_pane="%other", body="Nudge2", notify=True)
+        r2 = await send_message(from_pane="%99998", to_pane="%99997", body="Nudge2", notify=True)
         check("send_message rate-limit skips", r2.get("wake_status") == "skipped_recent", str(r2))
 
         # -- Tool 8: receive_messages --
-        r = await receive_messages(pane_id="%other")
+        r = await receive_messages(pane_id="%99997")
         check("receive_messages has messages", "messages" in r, str(r))
         msgs = r.get("messages", [])
         check("receive_messages count", r.get("count", 0) >= 1, str(r))
@@ -935,16 +1047,16 @@ def _run_self_test():
         check("receive_messages content", "Hello" in bodies, str(bodies))
 
         # Verify idempotency (second read returns empty)
-        r2 = await receive_messages(pane_id="%other")
+        r2 = await receive_messages(pane_id="%99997")
         check("receive_messages idempotent", r2.get("count", -1) == 0, str(r2))
 
         # -- Tool 9: kill_pane (no-confirm gate) --
-        r = await kill_pane(pane_id="%nonexistent_test_pane", confirm=False)
+        r = await kill_pane(pane_id="%99996", confirm=False)
         check("kill_pane confirm gate", r.get("status") == "confirmation_required", str(r))
         check("kill_pane has warning", "warning" in r, str(r))
 
         # -- Tool 10: cancel_dispatch (tmux-dependent, test graceful handling) --
-        r = await cancel_dispatch(pane_id="%nonexistent_test_pane")
+        r = await cancel_dispatch(pane_id="%99996")
         check("cancel_dispatch returns dict", isinstance(r, dict), str(r))
 
         # -- Tool 11: bootstrap_validate --

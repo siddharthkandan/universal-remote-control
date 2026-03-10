@@ -54,13 +54,12 @@ fi
 # ── Response File (atomic write) ─────────────────────────────────
 if [ -n "$RESPONSE" ]; then
     TMP=$(mktemp "$RESPONSE_DIR/.tmp.XXXXXX")
-    jq -n \
+    printf '%s' "$RESPONSE" | jq -Rs \
         --arg pane "$PANE" \
         --arg cli "$CLI" \
         --argjson epoch "$EPOCH" \
-        --arg response "$RESPONSE" \
         --argjson len "${#RESPONSE}" \
-        '{pane:$pane, cli:$cli, epoch:$epoch, response:$response, len:$len}' \
+        '{pane:$pane, cli:$cli, epoch:$epoch, response:., len:$len}' \
         > "$TMP" 2>/dev/null
 
     if [ -s "$TMP" ]; then
@@ -83,7 +82,8 @@ if [ "$PANE" != "unknown" ]; then
         tmux set-option -p -t "$PANE" @bridge_needs_clear 1 2>/dev/null
     fi
     if [ "$_needs_clear" = "1" ]; then
-        tmux set-option -pu -t "$PANE" @bridge_needs_clear 2>/dev/null
+        # Atomically clear flag BEFORE respawn to prevent double-fire race
+        tmux set-option -p -t "$PANE" @bridge_needs_clear 0 2>/dev/null
         tmux set-option -p -t "$PANE" @bridge_relays 0 2>/dev/null
         # Respawn after signal ordering completes (background, 2s delay for signal flush)
         # After respawn, re-send /remote-control to restore phone connection (12s for Claude startup)
@@ -97,14 +97,20 @@ fi
 touch "$SIGNAL_DIR/done_${PANE}"
 # 3. tmux wait-for wakes dispatcher
 tmux wait-for -S "urc_done_${PANE}" 2>/dev/null
-# 4. Append JSONL (best-effort)
-jq -nc \
+# 4. Append JSONL (best-effort, with rotation at 1MB)
+_STREAM="$STREAM_DIR/${PANE}.jsonl"
+if [ -f "$_STREAM" ]; then
+    _STREAM_SIZE=$(stat -f%z "$_STREAM" 2>/dev/null || stat -c%s "$_STREAM" 2>/dev/null || echo 0)
+    if [ "${_STREAM_SIZE:-0}" -gt 1048576 ]; then
+        tail -500 "$_STREAM" > "${_STREAM}.tmp" && mv "${_STREAM}.tmp" "$_STREAM"
+    fi
+fi
+printf '%s' "${RESPONSE:-}" | jq -Rsc \
     --arg pane "$PANE" \
     --arg cli "$CLI" \
     --argjson epoch "$EPOCH" \
-    --arg response "${RESPONSE:-}" \
     --argjson len "${#RESPONSE}" \
-    '{pane:$pane, cli:$cli, epoch:$epoch, response:$response, len:$len}' \
+    '{pane:$pane, cli:$cli, epoch:$epoch, response:., len:$len}' \
     >> "$STREAM_DIR/${PANE}.jsonl" 2>/dev/null
 
 # ── Relay push (surface activity to phone) ────────────────────────
@@ -125,15 +131,15 @@ if [ "$PANE" != "unknown" ] && [ -n "${RESPONSE:-}" ]; then
             _trig_msg=$(jq -r '.message // ""' "$_meta_file" 2>/dev/null)
             rm -f "$_meta_file"
         fi
-        jq -n --arg pane "$PANE" --arg cli "$CLI" --argjson epoch "$EPOCH" \
-            --arg response "$RESPONSE" \
+        printf '%s' "$RESPONSE" | jq -Rs \
+            --arg pane "$PANE" --arg cli "$CLI" --argjson epoch "$EPOCH" \
             --arg triggered_type "$_trig_type" \
             --arg triggered_by "$_trig_by" \
             --arg triggered_msg "$_trig_msg" \
-            '{pane:$pane, cli:$cli, epoch:$epoch, response:$response,
+            '{pane:$pane, cli:$cli, epoch:$epoch, response:.,
               triggered_type:$triggered_type, triggered_by:$triggered_by, triggered_msg:$triggered_msg}' \
             > "$PROJECT_ROOT/.urc/pushes/${_relay}_${PANE}_${EPOCH}.json" 2>/dev/null
-        (bash "$PROJECT_ROOT/urc/core/send.sh" "$_relay" "__urc_push__" --cli claude >/dev/null 2>&1) &
+        (bash "$PROJECT_ROOT/urc/core/send.sh" "$_relay" "response from $PANE ($CLI) below:" --cli claude >/dev/null 2>&1) &
     fi
 fi
 

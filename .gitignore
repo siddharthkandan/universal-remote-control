@@ -30,6 +30,7 @@ dist/
 ideas for future optimizations/
 docs/rc-internals.md
 docs/plans/
+docs/internal/
 
 # OS / editor
 **/.DS_Store

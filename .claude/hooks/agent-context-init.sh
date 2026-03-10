@@ -48,87 +48,6 @@ _resolve_cli() {
     esac
 }
 
-# Pane-keyed registration in state.json
-register_current_pane() {
-    local _pane _state_file _state_dir _now _role _cli _epoch _boot_id
-
-    _pane=$(_resolve_pane_id)
-    [ -n "$_pane" ] || return 0
-
-    _state_file="$PROJECT_DIR/.urc/bridge/state.json"
-    _state_dir=$(dirname "$_state_file")
-    mkdir -p "$_state_dir" 2>/dev/null || true
-
-    # Initialize state.json with v5 schema if missing
-    if [ ! -f "$_state_file" ]; then
-        _boot_id=$(tmux display-message -p '#{start_time}' 2>/dev/null || echo "unknown")
-        printf '{"schema_version":5,"server_boot_id":"%s","peers":{},"roles":{},"pane_layout":{},"reset_lock":{"held_by":null,"acquired_at":null,"expires_at":null},"teams":{}}' \
-            "$_boot_id" > "$_state_file" 2>/dev/null || return 0
-    fi
-
-    # Source atomic write library (concurrent SessionStart writes need locking)
-    local _sw_lib="$PROJECT_DIR/urc/lib/state-write.sh"
-    if [ -f "$_sw_lib" ]; then
-        # shellcheck source=/dev/null
-        source "$_sw_lib"
-    fi
-
-    _role=$(_resolve_role)
-    _cli=$(_resolve_cli)
-    _now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    _epoch=""
-    [ -n "$SESSION_ID" ] && _epoch="${SESSION_ID:0:8}"
-
-    # Register under pane key with v5 schema fields (atomic write)
-    if declare -F sw_atomic_jq >/dev/null 2>&1; then
-        sw_atomic_jq "$_state_file" \
-            '
-            .schema_version = (.schema_version // 5)
-            | .peers = (.peers // {})
-            | .peers[$p] = (
-                (.peers[$p] // {})
-                + {cli:$cli, role:$role, status:"active", last_seen:$ts,
-                   session_epoch:(if $epoch == "" then null else $epoch end),
-                   context_pct:null}
-              )
-            | .roles = (.roles // {})
-            | .roles[$role] = ((.roles[$role] // []) + [$p] | unique)
-            ' \
-            --arg p "$_pane" \
-            --arg cli "$_cli" \
-            --arg role "$_role" \
-            --arg epoch "$_epoch" \
-            --arg ts "$_now" \
-            2>/dev/null || return 0
-    else
-        # Fallback: raw jq (state-write.sh not available)
-        local _tmp="${_state_file}.tmp.$$"
-        jq \
-            --arg p "$_pane" \
-            --arg cli "$_cli" \
-            --arg role "$_role" \
-            --arg epoch "$_epoch" \
-            --arg ts "$_now" \
-            '
-            .schema_version = (.schema_version // 5)
-            | .peers = (.peers // {})
-            | .peers[$p] = (
-                (.peers[$p] // {})
-                + {cli:$cli, role:$role, status:"active", last_seen:$ts,
-                   session_epoch:(if $epoch == "" then null else $epoch end),
-                   context_pct:null}
-              )
-            | .roles = (.roles // {})
-            | .roles[$role] = ((.roles[$role] // []) + [$p] | unique)
-            ' \
-            "$_state_file" > "$_tmp" 2>/dev/null || {
-                rm -f "$_tmp"
-                return 0
-            }
-        mv "$_tmp" "$_state_file" 2>/dev/null || rm -f "$_tmp"
-    fi
-}
-
 # Write agent-context marker for role detection
 if [ -n "$AGENT_TYPE" ] && [ -n "$SESSION_ID" ]; then
     mkdir -p "$PROJECT_DIR/.claude" 2>/dev/null || true
@@ -172,9 +91,6 @@ if [ -n "$SESSION_ID" ] || [ -n "${TMUX_PANE:-}" ]; then
         ln -sf "$SESSION_TARGET" "$SYMLINK_PATH" 2>/dev/null || true
     fi
 fi
-
-# Register the current pane in state.json
-register_current_pane
 
 # Clean up stale agent-context markers (>24h old)
 for f in "$PROJECT_DIR"/.claude/.agent-context-*; do

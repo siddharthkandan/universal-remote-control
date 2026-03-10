@@ -7,9 +7,9 @@ URC enables cross-CLI communication between Claude Code, Codex, and Gemini panes
 
 The RC Bridge lets you control this Codex pane from the Claude Code phone app:
 1. A Claude Code Haiku relay pane spawns alongside your pane
-2. It receives a bootstrap message like `(856) CODEX` to pair with your pane
-3. Phone messages go to the relay, which forwards them to your pane via `send.sh` (fire-and-forget)
-4. Your output is pushed back to the relay via `__urc_push__` and displayed on the phone
+2. It's pre-configured with your pane ID and CLI type via tmux pane options (set by `urc-spawn.sh`)
+3. Phone messages are dispatched to your pane via a `UserPromptSubmit` hook — no model turn consumed
+4. Your output is captured by `hook.sh` and written to a push file, which the relay picks up on its next wake and displays on the phone
 
 Launch with: `/rc-bridge`
 
@@ -72,7 +72,7 @@ The recipient will be notified automatically via their CLI's inbox hook.
 
 **Discover all agents:** `mcp__urc-coordination__get_fleet_status()` (~15.9K tokens) — only for fleet-wide discovery, orphan scans, or when you need agent metadata (cli, role, status, context%).
 ```json
-[{"pane_id":"%1320","cli":"claude","status":"active","label":"spec-writer","alive":true}, ...]
+{"agents":[{"pane_id":"%1320","cli":"claude","status":"active","label":"spec-writer","alive":true}, ...],"count":N}
 ```
 **Do NOT call `get_fleet_status` before launching Agent Teams** — those are new subprocesses that don't exist in the fleet yet.
 
@@ -93,8 +93,14 @@ Recipient retrieves with `mcp__urc-coordination__receive_messages(pane_id="%TARG
 
 **Message size limits:**
 - `dispatch_to_pane` / `dispatch-and-wait.sh`: text goes through tmux paste-buffer. Keep under **1000 chars**. 1000-3000 chars usually works but is not guaranteed; over 3000 risks silent truncation.
-- `send_message` (DB): no size limit (stored in SQLite). But the wake nudge text goes through tmux paste-buffer, so the nudge itself has the same limits.
-- For long content: write to `.urc/handoff-{FROM}-to-{TO}.md` (strip `%` from pane IDs) and dispatch a short reference like `"Read .urc/handoff-896-to-906.md"`. Sender creates; recipient deletes after reading. Handoff files are ephemeral.
+- `send_message` (DB): 100KB body limit. But the wake nudge text goes through tmux paste-buffer, so the nudge itself has the same limits.
+- For long content: write to `.urc/handoff-{FROM}-to-{TO}.md` (strip `%` from pane IDs) and use `send_message(notify=true)` with a short reference like `"Report ready at .urc/handoff-896-to-906.md — read and delete"`. Always use `send_message` (not `dispatch_to_pane`) so the recipient gets a wake nudge. Sender creates; recipient deletes after reading. Handoff files are ephemeral.
+
+**How to send results back to another agent:**
+1. **Short results (<1000 chars):** `send_message(from_pane=YOUR_PANE, to_pane=TARGET, body="your results", notify=true)`
+2. **Long results (>1000 chars):** Write handoff file, then `send_message` with short reference.
+3. **If `wake_status` returns `"failed"`:** Message IS stored — recipient discovers it via inbox hooks on next turn. No retry needed.
+4. **Never use `dispatch_to_pane` for "please read and respond"** — it's fire-and-forget with no inbox storage.
 
 **Read what another pane is showing:**
 `mcp__urc-coordination__read_pane_output(pane_id="%NNN", lines=30)`
@@ -146,7 +152,7 @@ Sequential calls to the same pane are delivered in order. Concurrent calls to di
 {"status":"timeout","captured":"last 40 lines of pane output..."}
 ```
 
-**`notify` default:** `notify=true` is recommended for all interactive messaging. `notify=false`: use when storing a message for later retrieval (logging, batch collection) without interrupting the recipient. If `send_message` returns `wake: "failed"`, no action needed — the message is stored and the recipient discovers it via inbox hooks on their next turn.
+**`notify` default:** `notify=true` is recommended for all interactive messaging. `notify=false`: use when storing a message for later retrieval (logging, batch collection) without interrupting the recipient. If `send_message` returns `wake_status: "failed"`, no action needed — the message is stored and the recipient discovers it via inbox hooks on their next turn.
 
 **`receive_messages` behavior:** Marks messages as read atomically — calling it twice returns nothing on the second call. Messages are ordered by DB insert time (FIFO).
 

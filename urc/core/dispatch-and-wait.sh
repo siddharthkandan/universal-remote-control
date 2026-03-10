@@ -32,28 +32,47 @@ fi
 # ── Acquire per-pane lock (mkdir-based, POSIX compatible) ────────
 if ! mkdir "$LOCK_DIR_PATH" 2>/dev/null; then
   if [ -d "$LOCK_DIR_PATH" ]; then
-    # Check for stale lock (older than 5 minutes)
-    _lock_mtime=$(stat -f%m "$LOCK_DIR_PATH" 2>/dev/null || stat -c%Y "$LOCK_DIR_PATH" 2>/dev/null || echo 0)
-    _lock_age=$(( $(date +%s) - _lock_mtime ))
-    if [ "$_lock_age" -gt 300 ]; then
-      echo "stale lock (${_lock_age}s), reclaiming" >&2
-      rmdir "$LOCK_DIR_PATH" 2>/dev/null
-      if ! mkdir "$LOCK_DIR_PATH" 2>/dev/null; then
+    # Fast path: check if lock holder PID is still alive
+    _reclaimed=0
+    if [ -f "$LOCK_DIR_PATH/pid" ]; then
+      _lock_pid=$(cat "$LOCK_DIR_PATH/pid" 2>/dev/null)
+      if [ -n "$_lock_pid" ] && ! kill -0 "$_lock_pid" 2>/dev/null; then
+        echo "lock holder PID $_lock_pid dead, reclaiming" >&2
+        rm -rf "$LOCK_DIR_PATH"
+        if mkdir "$LOCK_DIR_PATH" 2>/dev/null; then
+          echo $$ > "$LOCK_DIR_PATH/pid"
+          _reclaimed=1
+        fi
+      fi
+    fi
+    if [ "$_reclaimed" -eq 0 ]; then
+      # Fallback: stale lock (older than 5 minutes)
+      _lock_mtime=$(stat -f%m "$LOCK_DIR_PATH" 2>/dev/null || stat -c%Y "$LOCK_DIR_PATH" 2>/dev/null || echo 0)
+      _lock_age=$(( $(date +%s) - _lock_mtime ))
+      if [ "$_lock_age" -gt 300 ]; then
+        echo "stale lock (${_lock_age}s), reclaiming" >&2
+        rm -rf "$LOCK_DIR_PATH"
+        if mkdir "$LOCK_DIR_PATH" 2>/dev/null; then
+          echo $$ > "$LOCK_DIR_PATH/pid"
+        else
+          jq -n --arg pane "$PANE" '{status:"busy",pane:$pane}'
+          exit 1
+        fi
+      else
         jq -n --arg pane "$PANE" '{status:"busy",pane:$pane}'
         exit 1
       fi
-    else
-      jq -n --arg pane "$PANE" '{status:"busy",pane:$pane}'
-      exit 1
     fi
   else
     jq -n --arg pane "$PANE" '{status:"busy",pane:$pane}'
     exit 1
   fi
+else
+  echo $$ > "$LOCK_DIR_PATH/pid"
 fi
 
 # ── Cleanup on exit ─────────────────────────────────────────────
-trap 'rmdir "$LOCK_DIR_PATH" 2>/dev/null' EXIT
+trap 'rm -rf "$LOCK_DIR_PATH" 2>/dev/null' EXIT
 
 # ── Write dispatch metadata (attribution for relay push) ─────────
 _DISPATCH_META_DIR="$PROJECT_ROOT/.urc/dispatches"

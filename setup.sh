@@ -138,13 +138,10 @@ echo ""
 mkdir -p "$SCRIPT_DIR/.urc/signals" \
          "$SCRIPT_DIR/.urc/responses" \
          "$SCRIPT_DIR/.urc/streams" \
-         "$SCRIPT_DIR/.urc/seq" \
          "$SCRIPT_DIR/.urc/locks" \
          "$SCRIPT_DIR/.urc/timeout" \
-         "$SCRIPT_DIR/.urc/reply_to" \
-         "$SCRIPT_DIR/.urc/inbox" \
-         "$SCRIPT_DIR/.urc/logs"
-ok ".urc/ directories ready (signals, responses, streams, seq, locks, timeout, reply_to, inbox, logs)"
+         "$SCRIPT_DIR/.urc/inbox"
+ok ".urc/ directories ready (signals, responses, streams, locks, timeout, inbox)"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════
@@ -319,7 +316,7 @@ if [[ $HAS_GEMINI -eq 1 ]]; then
       "command": ".venv/bin/python3",
       "args": ["urc/core/server.py"],
       "env": { "PYTHONPATH": "." }
-    },
+    }
   },
   "hooks": {
     "BeforeAgent": [

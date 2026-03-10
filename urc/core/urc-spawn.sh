@@ -88,7 +88,7 @@ while IFS=' ' read -r candidate_pane _; do
     log "Found orphaned relay: $ORPHAN_RELAY (old target $old_target is dead)"
     break
   fi
-done < <(db_get_bridges)
+done < <(db_get_bridges || true)
 
 if [ -n "$ORPHAN_RELAY" ]; then
   log "Re-pairing orphan $ORPHAN_RELAY → $TARGET_PANE"
@@ -107,53 +107,51 @@ fi
 log "Spawning relay pane..."
 # auto-approve: relay uses --dangerously-skip-permissions
 RELAY_PANE=$(tmux split-window -v -d -P -F '#{pane_id}' -t "$TARGET_PANE" \
-  "cd '$URC_ROOT' && source .venv/bin/activate && claude --agent rc-bridge --model haiku --dangerously-skip-permissions; EC=\$?; [ \$EC -ne 0 ] && echo \"\$(date '+%H:%M:%S') Relay crashed (exit \$EC)\" >> '$URC_ROOT/.urc/crashes.log' && tmux display-message \"RC Bridge relay crashed (exit \$EC)\" && sleep 10")
+  "cd '$URC_ROOT' && source .venv/bin/activate && unset CLAUDECODE && export CLAUDE_CODE_REMOTE_SEND_KEEPALIVES=true && claude --agent rc-bridge --model haiku --dangerously-skip-permissions; EC=\$?; [ \$EC -ne 0 ] && echo \"\$(date '+%H:%M:%S') Relay crashed (exit \$EC)\" >> '$URC_ROOT/.urc/crashes.log' && tmux display-message \"RC Bridge relay crashed (exit \$EC)\" && sleep 10")
 log "Relay pane: $RELAY_PANE"
 
 # ============================================================
-# Step 4: Wait for relay boot + verify + bootstrap
+# Step 4: Pre-set tmux state + wait for boot + activate
 # ============================================================
+# Pre-set bridge state on the relay pane BEFORE Claude boots.
+# The agent reads these on its first turn (lazy bootstrap) — no text
+# bootstrap message needed, so no user bubble appears on the phone.
+log "Pre-setting bridge state on relay pane..."
+tmux set-option -p -t "$RELAY_PANE" @bridge_target "$TARGET_PANE"
+tmux set-option -p -t "$RELAY_PANE" @bridge_cli "$CLI_TYPE"
+tmux set-option -p -t "$RELAY_PANE" @bridge_relays 0
+tmux set-option -p -t "$TARGET_PANE" @bridge_relay "$RELAY_PANE"
+
+# Pre-register relay in coordination DB (so fleet sees it immediately)
+TARGET_NUM="${TARGET_PANE#%}"
+RELAY_LABEL="(${TARGET_NUM}) ${CLI_TYPE}"
+"$VENV_PYTHON" -c "
+import sqlite3, time
+db = sqlite3.connect('$DB_PATH')
+db.execute('INSERT OR REPLACE INTO agents (pane_id, cli, role, status, label, registered_at) VALUES (?, ?, ?, ?, ?, ?)',
+           ('$RELAY_PANE', 'claude-code', 'bridge', 'active', '$RELAY_LABEL', int(time.time())))
+db.commit()
+db.close()
+" 2>/dev/null && log "Registered relay as '$RELAY_LABEL'" || log "WARN: DB registration failed (non-fatal)"
+
 log "Waiting for relay boot..."
 sleep 10
 
 if ! tmux display-message -t "$RELAY_PANE" -p '#{pane_id}' >/dev/null 2>&1; then
   log "ERROR: Relay pane $RELAY_PANE died during startup"
-  echo "{\"status\":\"failed\",\"error\":\"relay_died\",\"relay\":\"$RELAY_PANE\"}"
+  echo "{\"status\":\"failed\",\"error\":\"relay_died\",\"relay\":\"$RELAY_PANE\",\"target\":\"$TARGET_PANE\"}"
   exit 1
 fi
 
-# Bootstrap
-TARGET_NUM="${TARGET_PANE#%}"
-log "Bootstrapping relay: ($TARGET_NUM) $CLI_TYPE"
-bash "$URC_ROOT/urc/core/send.sh" "$RELAY_PANE" "($TARGET_NUM) $CLI_TYPE" --cli claude >/dev/null 2>&1
-
 # ============================================================
-# Step 5: Wait for bootstrap confirmation + activate /remote-control
+# Step 5: Name session + activate /remote-control
 # ============================================================
-# Poll for @bridge_target — set by relay agent during bootstrap turn.
-# This replaces the fragile fixed sleep that caused race conditions.
-log "Waiting for bootstrap confirmation..."
-_bootstrap_ok=""
-for _i in $(seq 1 30); do
-    _target=$(tmux show-options -t "$RELAY_PANE" -pqv @bridge_target 2>/dev/null || true)
-    if [ -n "$_target" ]; then
-        _bootstrap_ok=1
-        log "Bootstrap confirmed in ${_i}s — target: $_target"
-        break
-    fi
-    sleep 1
-done
+# /rename sets the conversation title — no user bubble, no model turn.
+log "Naming session: (${TARGET_NUM}) ${CLI_TYPE}"
+bash "$URC_ROOT/urc/core/send.sh" "$RELAY_PANE" "/rename (${TARGET_NUM}) ${CLI_TYPE}" --cli claude >/dev/null 2>&1
+sleep 2
 
-if [ -z "$_bootstrap_ok" ]; then
-    log "ERROR: Bootstrap failed — relay never set @bridge_target (30s timeout)"
-    echo "{\"status\":\"failed\",\"error\":\"bootstrap_timeout\",\"relay\":\"$RELAY_PANE\",\"target\":\"$TARGET_PANE\"}"
-    exit 1
-fi
-
-# Give relay 3s to finish bootstrap turn (register_agent, rename_agent, display)
-sleep 3
-
-# Activate /remote-control — bootstrap confirmed, safe to send
+log "Activating /remote-control..."
 bash "$URC_ROOT/urc/core/send.sh" "$RELAY_PANE" "/remote-control" --cli claude >/dev/null 2>&1
 
 # ============================================================

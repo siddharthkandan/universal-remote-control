@@ -111,14 +111,14 @@ Phone (Claude App)
     |  Remote Control
     v
 Haiku Relay (rc-bridge agent)        ← self-managing, auto-clears at 25 sends
-    |  send.sh         __urc_push__
-    |  (dispatch) ←——— (response)
-    v                      |
-Target pane (tmux)         |
-    |  hook.sh fires ——————┘         ← captures response, pushes back to relay
+    |  send.sh              push files
+    |  (dispatch) ←———————— (response)
+    v                           |
+Target pane (tmux)              |
+    |  hook.sh fires ———————————┘    ← captures response, writes push file
 ```
 
-**The relay is a stateless passthrough.** State lives in tmux pane options (`@bridge_target`, `@bridge_cli`, `@bridge_relays`). The relay reads your phone message, calls `send.sh` to inject it into the target pane, and waits. When the target completes its turn, `hook.sh` captures the response and pushes it back via `__urc_push__`. The relay displays it on your phone.
+**The relay is a stateless passthrough.** State lives in tmux pane options (`@bridge_target`, `@bridge_cli`, `@bridge_relays`). Dispatch and response reading are handled through a `UserPromptSubmit` hook (`bridge-push-hook.sh`) — the relay's phone message triggers the hook, which dispatches via `send.sh` and reads any pending push files, all without consuming a model turn. When the target completes its turn, `hook.sh` captures the response and writes a push file. The relay picks it up on its next wake and displays it on your phone.
 
 **The MCP server** (`urc-coordination`, 11 tools) provides the cross-pane infrastructure: dispatch messages, read pane output, register agents, track heartbeats, and send/receive async messages via SQLite. Any agent in any CLI can use these tools to coordinate with others.
 
@@ -148,7 +148,7 @@ urc/
 │   ├── inbox-watcher.sh          Background inbox notification
 │   ├── circuit.sh                Circuit breaker for dispatch failures
 │   ├── relay-ctl.sh              $0 relay configuration
-│   └── test-*.sh                 8 test suites (71 assertions)
+│   └── test-*.sh                 8 test suites (85 assertions)
 ├── lib/
 │   └── state-write.sh            Atomic JSON write helper
 └── schemas/
@@ -170,9 +170,10 @@ urc/
 ### Plugin System
 
 ```
-.claude-plugin/plugin.json    Plugin manifest
-hooks/hooks.json              Plugin hooks (Stop + SessionStart)
-hooks/scripts/plugin-setup.sh Auto-setup on first session
+.claude-plugin/plugin.json           Plugin manifest
+hooks/hooks.json                     Plugin hooks (Stop + SessionStart)
+hooks/scripts/bridge-push-hook.sh    Hook-based dispatch + push reading (UserPromptSubmit)
+hooks/scripts/plugin-setup.sh        Auto-setup on first session
 ```
 
 ## Documentation
@@ -210,6 +211,20 @@ Needs Python 3.10+. On some systems: `sudo apt install python3.12-venv`.
 
 **Plugin validation fails?**
 Run `bash scripts/validate-plugin.sh` for diagnostics. Most common fix: re-run `setup.sh`.
+
+## Known Issues
+
+### RC session idle timeout (~20 minutes) — [#32982](https://github.com/anthropics/claude-code/issues/32982)
+
+Remote Control sessions are deregistered server-side after ~20 minutes of idle time, even when the local CLI process is alive. This affects ALL `/remote-control` sessions (not just URC relays) and is caused by a keepalive bug in Claude Code:
+
+1. `CLAUDE_CODE_REMOTE` (set internally for all RC sessions) disables the 5-minute WebSocket keepalive
+2. `CLAUDE_CODE_REMOTE_SEND_KEEPALIVES` (the replacement) is refcount-gated — only sends keepalives during active model processing, not during idle
+3. Result: idle RC sessions have zero keepalive mechanism and the server deregisters them
+
+**Impact on URC:** Relay sessions lose their phone connection after ~20 minutes of inactivity. The relay process stays alive but the phone shows "Disconnected" / "unknown network error."
+
+**Status:** Bug report filed with full source analysis. Waiting for Anthropic's response before implementing workarounds. A watchdog (periodic activity to reset the server-side timer) is the known workaround but is deferred pending upstream clarity.
 
 ## Known Limitations
 
