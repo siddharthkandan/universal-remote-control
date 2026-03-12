@@ -6,6 +6,13 @@
       "env": {
         "PYTHONPATH": "."
       }
+    },
+    "codex": {
+      "command": "codex",
+      "args": ["mcp-server"],
+      "env": {
+        "MCP_TOOL_TIMEOUT": "120000"
+      }
     }
   }
 }

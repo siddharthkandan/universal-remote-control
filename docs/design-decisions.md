@@ -46,6 +46,21 @@ Read this before modifying `urc/core/` components — especially `send.sh`, `hoo
 - **Bootstrap elimination (2026-03-09)**: `urc-spawn.sh` pre-sets `@bridge_target`, `@bridge_cli`, `@bridge_relays` on relay pane + `@bridge_relay` on target pane immediately after spawn. Pre-registers relay in coordination DB. Uses `/rename (NNN) CLI_TYPE` to name session (no user bubble on phone). Agent lazy-bootstraps on first message. Legacy text bootstrap `(NNN) CLI_TYPE` kept in agent prompt for backwards compatibility.
 - **Dispatch-acknowledged push (2026-03-09)**: When `send.sh` delivers text to a pane with `@bridge_relay`, it writes a `status:"processing"` push file and fires `__urc_push__` to the relay. Gives phone user immediate "message received" visibility. Fixes 4+ minute relay blind spot during Codex tool-call chains (Codex's notify hook only fires with `last-assistant-message` on text output, not during tool execution). No recursion risk — relay panes never have `@bridge_relay`. Skipped for control messages. Processing push files now include `dispatched_by` attribution read from dispatch metadata (`.urc/dispatches/{PANE}.json`), displayed as `[PROCESSING on %NNN (cli) -- dispatched by %SRC: "msg"]`. Push files are always deleted after hook read (`SHOULD_DELETE=1` unconditional) — both "message delivered" and "response from" wake tokens consume their files atomically via `additionalContext`.
 
+### Codex Paste Burst Detection & Bracketed Paste
+- **Codex's paste burst detector fires at 8ms between chars on Unix** (30ms on Windows). When 3+ chars arrive faster than 8ms apart, Codex's `PasteBurst` state machine (in `paste_burst.rs`) buffers them and **suppresses Enter** — treating it as newline instead of submit. This means any injection method that sends chars individually (e.g., `tmux send-keys "hello" Enter`) would trigger burst detection if chars arrive <8ms apart, causing the message to get stuck in the input field.
+- **`tmux paste-buffer -p` (bracketed paste) is mandatory**: The `-p` flag wraps the paste in `\e[200~...\e[201~` escape sequences. `crossterm` delivers this as a single `Event::Paste(String)`, which Codex routes directly to the composer's paste handler — completely bypassing the per-char burst detector. Without `-p`, tmux injects raw chars through the PTY, which hit the burst detector at PTY speed (<1ms between chars).
+- **Enter after bracketed paste works correctly**: `Event::Paste(String)` doesn't trigger autocomplete popups in Codex (unlike Claude/Gemini), so Enter immediately submits. No Escape needed. This is why `send.sh` skips Escape for Codex targets.
+- **If `-p` were removed from `send.sh`**: Every message would trigger burst detection → Enter becomes newline → message sits in input field indefinitely → agent appears dead.
+- **Source**: `codex-rs/tui/src/bottom_pane/paste_burst.rs`, `chat_composer.rs`. Timing constants: 8ms burst threshold (Unix), 3-char minimum, 8ms flush timeout. Documented from Codex source analysis (2026-03-11).
+
+### MCP Tool Timeout Defaults
+- **Claude Code's MCP tool call timeout defaults to ~27.8 hours** (`s8z=1e8` = 100,000,000ms in cli.js). This is effectively unlimited — MCP tools will never timeout from the MCP layer in any practical scenario.
+- **Codex's MCP tool timeout defaults to 60s** (`tool_timeout_sec = 60` in config.toml). URC overrides this to 120s via `.codex/config.toml`.
+- **URC's own timeouts are the only effective protection**: `dispatch-and-wait.sh` (60-300s configurable), circuit breaker (`urc/core/circuit.sh`), and `send.sh` fingerprint polling (2s) provide the real timeout boundaries. The MCP layer provides no meaningful guard.
+- **`MCP_TOOL_TIMEOUT` env var** can override Claude Code's default (set in `.mcp.json` env block). URC sets `MCP_TOOL_TIMEOUT=120000` for the codex MCP server entry.
+- **Design implication**: Never rely on MCP-layer timeouts for correctness. Always implement application-level timeouts in URC tools and scripts.
+- **Source**: `cli.js` line 587 (`s8z=1e8`), Codex `config.toml` schema. Documented from static analysis of Claude Code v2.1.71 and Codex source (2026-03-11).
+
 ## Rejected Approaches (2026-03-08 — Enter regression investigation)
 
 These were all tested and failed. Do not retry without new evidence.

@@ -14,7 +14,7 @@
         "repo": "siddharthkandan/universal-remote-control"
       },
       "description": "Control Codex and Gemini from your phone. Coordinate AI agents across CLIs via tmux.",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "author": {
         "name": "Siddharth Kandan"
       },

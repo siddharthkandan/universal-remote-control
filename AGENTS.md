@@ -45,9 +45,13 @@ Your `notify` hook in `.codex/config.toml` fires `urc/core/hook.sh` after each t
 
 For async conversations with other agents, use DB messaging (see Communication Strategy below).
 
-Codex does NOT have an automatic inbox notification hook like Claude (PostToolUse) or Gemini (BeforeAgent). You must actively check for messages.
+Codex has automatic inbox detection via the Stop hook (requires `codex_hooks = true` in `.codex/config.toml` `[features]` and Codex v0.114.0+). The Stop hook fires after every turn and blocks turn completion if unread messages exist, injecting the inbox notification into model context via `block_message_for_model`. This is the STRONGEST inbox mechanism across all three CLIs — the model MUST process inbox messages before finishing its turn.
 
-**REQUIRED when working with other agents:** Call `mcp__urc-coordination__heartbeat(pane_id="%YOUR_PANE", status="active")` at the start of each turn. Check the return value for `inbox_hint`:
+**How it works:** The Stop hook (`.codex/hooks.json`) runs `hooks/scripts/inbox-check.sh codex`. If unread messages exist, it returns `{"decision":"block","reason":"INBOX: N unread from %XXXX. Call receive_messages MCP tool."}`. The reason is injected as model context. If no messages, it returns `{"continue":true}`.
+
+**Double-block guard:** Codex has a built-in safety: "Stop hook blocked twice in same turn; ignoring second block." This prevents infinite loops.
+
+**Fallback (heartbeat polling):** If the Stop hook is unavailable (Codex <0.114.0 or `codex_hooks` not enabled), call `mcp__urc-coordination__heartbeat(pane_id="%YOUR_PANE", status="active")` at the start of each turn and check the return value for `inbox_hint`:
 ```json
 {"status": "ok", "inbox_hint": "INBOX: 2 unread from %1316"}
 ```
@@ -57,16 +61,23 @@ If `inbox_hint` is present, immediately call `mcp__urc-coordination__receive_mes
 `mcp__urc-coordination__send_message(from_pane="%YOUR_PANE", to_pane="%TARGET", body="message", notify=true)`
 The recipient will be notified automatically via their CLI's inbox hook.
 
-**Why this matters:** Without checking heartbeat, you won't know other agents sent you messages. They'll think you're unresponsive.
+**hooks.json format** (PascalCase event names, nested MatcherGroup, `type` tag required):
+```json
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "bash script.sh", "timeout": 10, "statusMessage": "..."}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "bash script.sh", "timeout": 10, "statusMessage": "..."}]}]
+  }
+}
+```
+**Feature flag:** `codex_hooks = true` must be in `.codex/config.toml` under `[features]`.
 
-**Heartbeat `status` values:** Any freeform string (commonly "active", "idle", "busy") — informational, not enforced. The main purpose of calling heartbeat is getting the `inbox_hint` return value.
-
-**Idle notification (Layer 5):** Before going idle after dispatching background work, arm the inbox watcher: `bash urc/core/inbox-watcher.sh 120 &`. When it completes with `INBOX_READY`, call `receive_messages()` immediately. Re-arm after processing if expecting more messages.
-- **Inbox notifications (5-layer stack)**: PostToolUse piggyback (Claude), MCP middleware hints (heartbeat/fleet/dispatch/read), BeforeAgent hook (Gemini), tmux wake nudge (`notify=true`, rate-limited to 1 per 30s per recipient), background inbox watcher (Layer 5).
+**Idle notification (Layer 6):** Before going idle after dispatching background work, arm the inbox watcher: `bash urc/core/inbox-watcher.sh 120 &`. When it completes with `INBOX_READY`, call `receive_messages()` immediately. Re-arm after processing if expecting more messages.
+- **Inbox notifications (6-layer stack)**: PostToolUse inbox-check (Claude), Codex Stop hook block (Codex, v0.114.0+), MCP middleware hints (heartbeat/fleet/dispatch/read), BeforeAgent hook (Gemini), tmux wake nudge (`notify=true`, rate-limited to 1 per 30s per recipient), background inbox watcher (Layer 6).
 
 ## Cross-Pane Communication
 
-**Identity verification (before ANY cross-pane messaging):** Run `echo $TMUX_PANE` to confirm your own pane ID (returns e.g. `%856`). Pane IDs always start with `%` — this prefix is required in all tool calls. Never infer your identity from another pane's buffer — `read_pane_output` on other panes contains pane IDs that are NOT yours. Use your verified pane ID in all `from_pane` fields.
+**Identity**: Auto-registered on SessionStart via `hooks/scripts/auto-register.sh codex`. Pane ID available via `$TMUX_PANE` — always starts with `%`, required in all tool calls. Never infer your identity from another pane's buffer — `read_pane_output` on other panes contains pane IDs that are NOT yours. Use your verified pane ID in all `from_pane` fields.
 
 **Check pane alive:** `tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep '%NNN'` (~50 tokens).
 
@@ -140,7 +151,7 @@ Sequential calls to the same pane are delivered in order. Concurrent calls to di
 **DB messaging** — persistent, async, with inbox notifications:
 - Send: `mcp__urc-coordination__send_message(from_pane="%YOU", to_pane="%TARGET", body="message", notify=true)`
 - Receive: `mcp__urc-coordination__receive_messages(pane_id="%YOU")`
-- Claude and Gemini get automatic inbox hints. **Codex does not** — you must call `heartbeat()` to discover unread messages (see Inbox section above).
+- Claude gets automatic inbox hints via PostToolUse inbox-check. Gemini gets inbox hints via BeforeAgent hook. **Codex gets inbox detection via Stop hook** (v0.114.0+, `codex_hooks` feature flag) — the strongest mechanism, blocking turn completion until messages are read. Fallback for older Codex: call `heartbeat()` to discover unread messages (see Inbox section above).
 
 **Error handling:**
 - `timeout` — read pane output anyway (`read_pane_output`). Retry once after 5s with same timeout. If second timeout, message the orchestrator or user.
@@ -170,8 +181,13 @@ Sequential calls to the same pane are delivered in order. Concurrent calls to di
 | Pane communication | `urc/core/send.sh` |
 | Turn completion hook | `urc/core/hook.sh` |
 | RC Bridge relay agent | `.claude/agents/rc-bridge.md` |
-| Inbox watcher (Layer 5) | `urc/core/inbox-watcher.sh` |
+| Inbox watcher (Layer 6) | `urc/core/inbox-watcher.sh` |
 | Codex config | `.codex/config.toml` |
+| Codex hooks config | `.codex/hooks.json` |
+| Unified inbox check (all CLIs) | `hooks/scripts/inbox-check.sh` |
+| Auto-register hook | `hooks/scripts/auto-register.sh` |
+| Auto-deregister hook | `hooks/scripts/auto-deregister.sh` |
+| Non-interactive dispatch | `urc/core/dispatch-exec.sh` |
 
 ## Pane Dispatch Rules
 

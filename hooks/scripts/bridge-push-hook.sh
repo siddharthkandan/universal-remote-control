@@ -40,6 +40,12 @@ case "$PROMPT" in
 
     CLI=$(tmux show-options -pv -t "$PANE" @bridge_cli 2>/dev/null || echo "unknown")
 
+    # Resolve @"path" file references for non-Claude targets
+    # Phone uploads → Claude Code creates @"/path/to/file" → other CLIs see literal text
+    if [ "$CLI" != "claude" ] && [ "$CLI" != "claude-code" ]; then
+      PROMPT=$(printf '%s' "$PROMPT" | bash "$URC_ROOT/hooks/scripts/resolve-file-refs.sh" "$URC_ROOT")
+    fi
+
     # Clean stale push files before dispatch
     find "$PUSH_DIR" -name "${PANE}_*.json" -type f -delete 2>/dev/null || true
 
@@ -132,6 +138,24 @@ done
 
 # ── Return via additionalContext ────────────────────────────────
 [ -z "$CONTENT" ] && exit 0
+
+# ── Overflow guard (additionalContext 10K hard limit) ────────────
+# "PUSH_DATA:\n" prefix = 11 chars. Leave 500 char margin for JSON envelope + hook metadata.
+MAX_CONTENT=9000
+CONTENT_LEN=${#CONTENT}
+if [ "$CONTENT_LEN" -gt "$MAX_CONTENT" ]; then
+    OVERFLOW_DIR="$PUSH_DIR/overflow"
+    mkdir -p "$OVERFLOW_DIR"
+    OVERFLOW_FILE="$OVERFLOW_DIR/${PANE}_$(date +%s).md"
+    printf '%s' "$CONTENT" > "$OVERFLOW_FILE"
+    # Truncate to fit, append overflow notice
+    CONTENT="$(printf '%.8500s' "$CONTENT")
+
+---
+[TRUNCATED — full content (${CONTENT_LEN} chars) saved to: ${OVERFLOW_FILE}]
+Read the file, echo all responses to the user, then delete the overflow file."
+fi
+
 ESCAPED=$(printf '%s' "PUSH_DATA:
 $CONTENT" | jq -Rs .)
 printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}' "$ESCAPED"

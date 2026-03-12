@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS agents (
     health             TEXT DEFAULT 'ok',
     restart_count      INTEGER DEFAULT 0,
     registered_at      TEXT DEFAULT (datetime('now')),
-    label              TEXT DEFAULT ''
+    label              TEXT DEFAULT '',
+    source             TEXT DEFAULT 'urc'
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -114,6 +115,12 @@ def init_schema(conn):
         conn.executescript(_CREATE_TABLES)
         conn.executescript(_CREATE_INDEXES)
 
+        # Schema migration: add source column if missing (safe for existing DBs)
+        try:
+            conn.execute("SELECT source FROM agents LIMIT 0")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE agents ADD COLUMN source TEXT DEFAULT 'urc'")
+
 
 # ---------------------------------------------------------------------------
 # Retry Utility
@@ -154,7 +161,7 @@ def execute_with_retry(conn, sql, params=(), retries=3):
 # ---------------------------------------------------------------------------
 
 
-def register_agent(conn, pane_id, cli, role="worker", pid=None, model=""):
+def register_agent(conn, pane_id, cli, role="worker", pid=None, model="", source="urc"):
     """Register or re-register an agent via INSERT OR REPLACE.
 
     Preserves existing label on re-register. Sets registered_at and
@@ -167,6 +174,7 @@ def register_agent(conn, pane_id, cli, role="worker", pid=None, model=""):
         role:    Agent role string (default "worker").
         pid:     Process ID of the agent process.
         model:   Model name string (default "").
+        source:  Registration source: "urc" or "agent_teams" (default "urc").
     """
     now = time.time()
 
@@ -182,9 +190,9 @@ def register_agent(conn, pane_id, cli, role="worker", pid=None, model=""):
         """INSERT OR REPLACE INTO agents
            (pane_id, cli, model, role, status, pid, pid_start_time,
             context_pct, silence_threshold, last_heartbeat, health,
-            restart_count, registered_at, label)
-           VALUES (?, ?, ?, ?, 'active', ?, ?, -1, 120, ?, 'ok', 0, datetime('now'), ?)""",
-        (pane_id, cli, model, role, pid, pid_start, now, existing_label),
+            restart_count, registered_at, label, source)
+           VALUES (?, ?, ?, ?, 'active', ?, ?, -1, 120, ?, 'ok', 0, datetime('now'), ?, ?)""",
+        (pane_id, cli, model, role, pid, pid_start, now, existing_label, source),
     )
 
 

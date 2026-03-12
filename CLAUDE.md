@@ -38,20 +38,22 @@
 | One-way command, no response | Fire-and-forget | `dispatch_to_pane(pane_id, message)` |
 | Async message/question/task | DB messaging | `send_message(from, to, body, notify=true)` |
 | Phone to Codex/Gemini | Relay (RC Bridge, async) | `/urc codex` or `/urc gemini` |
+| Agent-to-agent (application-level) | codex mcp-server | `mcp__codex__codex(prompt="...")` |
+| Headless one-shot (no tmux) | Non-interactive dispatch | `bash urc/core/dispatch-exec.sh <cli> <prompt>` |
 
 - **Agent Teams vs send_message**: Agent Teams spawns a subprocess that shares the parent's context window and returns results inline — use background agents for large tasks to avoid context pressure. `send_message` is async DB store — use for notifications, questions, or handoffs you won't wait for. Agent Teams is Claude-only; `send_message` works cross-CLI.
 - **Parallel dispatch**: For concurrent cross-CLI work, use `run_in_background=true`:
   - Bash tool: `Bash(command="bash urc/core/dispatch-and-wait.sh '%NNN' 'msg' 120", run_in_background=true)` — lightweight, result returned via task notification
   - Agent tool: `Agent(prompt="dispatch to %NNN...", run_in_background=true)` — use when dispatch needs LLM decision-making, result in agent response
   - Each background dispatch is independent — one failure doesn't affect others. Check each result individually.
-- **Inbox awareness**: Claude has PostToolUse piggyback for automatic inbox detection. When you see `INBOX: N unread...`, call `receive_messages()` immediately.
-- **Codex inbox limitation**: Codex has no automatic inbox hook — it must call `heartbeat()` to discover messages. When orchestrating Codex agents, always use `notify=true` to send a wake nudge.
-- **Inbox notifications (5-layer stack)**: PostToolUse piggyback (Claude), MCP middleware hints (heartbeat/fleet/dispatch/read), BeforeAgent hook (Gemini), tmux wake nudge (`notify=true`, rate-limited to 1 per 30s per recipient), background inbox watcher (Layer 5).
-- **Idle notification (Layer 5)**: Before going idle after dispatching background work, arm the inbox watcher: `Bash(command="bash urc/core/inbox-watcher.sh 120", run_in_background=true)`. When it completes with `INBOX_READY`, call `receive_messages()` immediately. Re-arm after processing if expecting more messages.
+- **Inbox awareness**: Claude has PostToolUse inbox-check for automatic inbox detection. When you see `INBOX: N unread...`, call `receive_messages()` immediately.
+- **Codex inbox (v0.114.0+)**: Codex Stop hook auto-detects unread messages after every turn via `codex_hooks` feature flag. Hook blocks turn completion and forces model to call `receive_messages()`. Requires `.codex/hooks.json` with Stop hook config. Fallback for older Codex: `heartbeat()` polling + `notify=true` wake nudge.
+- **Inbox notifications (6-layer stack)**: PostToolUse inbox-check (Claude), Codex Stop hook block (Codex, v0.114.0+), MCP middleware hints (heartbeat/fleet/dispatch/read), BeforeAgent hook (Gemini), tmux wake nudge (`notify=true`, rate-limited to 1 per 30s per recipient), background inbox watcher (Layer 6).
+- **Idle notification (Layer 6)**: Before going idle after dispatching background work, arm the inbox watcher: `Bash(command="bash urc/core/inbox-watcher.sh 120", run_in_background=true)`. When it completes with `INBOX_READY`, call `receive_messages()` immediately. Re-arm after processing if expecting more messages.
 
 ## Cross-Pane Communication
 
-**Identity verification (before ANY cross-pane messaging):** Run `echo $TMUX_PANE` to confirm your own pane ID. Never infer your identity from another pane's buffer — reading `read_pane_output` on other panes will contain pane IDs that are NOT yours.
+**Identity**: Auto-registered on SessionStart via `hooks/scripts/auto-register.sh`. Pane ID available via `$TMUX_PANE`. Never infer your identity from another pane's buffer — reading `read_pane_output` on other panes will contain pane IDs that are NOT yours.
 
 See [AGENTS.md](AGENTS.md#cross-pane-communication) for the full cross-pane protocol.
 
@@ -110,9 +112,9 @@ See [AGENTS.md](AGENTS.md#cross-pane-communication) for the full cross-pane prot
 - **Agent Teams?** Do NOT call `get_fleet_status` before launching Agent Teams (the `Agent` tool). Agent Teams are new subprocesses — they don't exist in the fleet yet. Fleet discovery is only for existing cross-CLI panes.
 
 **CLI-specific notes for orchestrators:**
-- **Codex**: no auto inbox — must call `heartbeat()`. Always use `notify=true`. Escape key breaks Codex TUI input — `send.sh` skips Escape for Codex automatically.
+- **Codex (v0.114.0+)**: auto inbox via Stop hook (`codex_hooks` feature flag + `.codex/hooks.json`), now uses unified `hooks/scripts/inbox-check.sh codex`. Hook blocks turn and forces `receive_messages()`. For older Codex (<0.114.0): no auto inbox, must call `heartbeat()`, always use `notify=true`. Escape key breaks Codex TUI input — `send.sh` skips Escape for Codex automatically. **Note:** Codex has no SessionEnd event — deregistration of dead Codex panes is handled by `bootstrap_validate` reaper.
 - **Gemini**: auto inbox via BeforeAgent hook. Uses underscore MCP naming (`mcp__urc_coordination__tool_name`).
-- **Claude**: auto inbox via PostToolUse piggyback. Escape needed before Enter (autocomplete dismissal) with 0.1s settle.
+- **Claude**: auto inbox via PostToolUse inbox-check. Escape needed before Enter (autocomplete dismissal) with 0.1s settle.
 
 ## $0 Relay (hook-based, zero model invocation)
 
@@ -138,12 +140,12 @@ Type `>codex: your message` or `>gemini: your message` to relay directly to a ta
 | Response file schema | `urc/schemas/response.md` |
 | RC Bridge agent | `.claude/agents/rc-bridge.md` |
 | Bridge push hook (dispatch + push reading) | `hooks/scripts/bridge-push-hook.sh` |
+| File reference resolver (phone attachments) | `hooks/scripts/resolve-file-refs.sh` |
 | Project-level hook registration | `.claude/settings.json` |
 | URC Spawn script (fire-and-forget) | `urc/core/urc-spawn.sh` |
 | RC Bridge skill (thin dispatcher) | `.claude/skills/urc/SKILL.md` |
-| Inbox piggyback (Claude) | `.claude/hooks/inbox-piggyback.sh` |
-| Inbox watcher (Layer 5) | `urc/core/inbox-watcher.sh` |
-| Inbox inject (Gemini) | `.gemini/hooks/inbox-inject.sh` |
+| Unified inbox check (all CLIs) | `hooks/scripts/inbox-check.sh` |
+| Inbox watcher (Layer 6) | `urc/core/inbox-watcher.sh` |
 | Plugin manifest | `.claude-plugin/plugin.json` |
 | Plugin hooks | `hooks/hooks.json` |
 | Plugin validator | `scripts/validate-plugin.sh` |
@@ -151,6 +153,11 @@ Type `>codex: your message` or `>gemini: your message` to relay directly to a ta
 | Relay config | `.urc/relay-config.json` |
 | Relay management | `urc/core/relay-ctl.sh` |
 | Circuit breaker | `urc/core/circuit.sh` |
+| Codex hooks config | `.codex/hooks.json` |
+| Auto-register hook | `hooks/scripts/auto-register.sh` |
+| Auto-deregister hook | `hooks/scripts/auto-deregister.sh` |
+| Non-interactive dispatch | `urc/core/dispatch-exec.sh` |
+| Codex MCP integration guide | `docs/codex-mcp-integration.md` |
 | Codex RC skill | `.agents/skills/rc-bridge/SKILL.md` |
 | Codex instructions | `AGENTS.md` |
 | Gemini instructions | `GEMINI.md` |
@@ -158,16 +165,16 @@ Type `>codex: your message` or `>gemini: your message` to relay directly to a ta
 | MCP config | `.mcp.json` |
 | Design decisions & rejected approaches | `docs/design-decisions.md` |
 
-## Tests (147 assertions across 10 suites)
+## Tests (160 assertions across 10 suites)
 - **DB**: `.venv/bin/python3 urc/core/db.py --self-test` (32 tests)
-- **Server**: `.venv/bin/python3 urc/core/server.py --self-test` (30 tests, 11 tools)
+- **Server**: `.venv/bin/python3 urc/core/server.py --self-test` (34 tests, 11 tools)
 - **Hook**: `bash urc/core/test-hook.sh` (25 tests)
 - **Dispatch**: `bash urc/core/test-dispatch-and-wait.sh` (9 tests)
 - **Send**: `bash urc/core/test-send.sh` (11 tests)
 - **Wait**: `bash urc/core/test-wait.sh` (5 tests)
 - **CLI adapter**: `bash urc/core/test-cli-adapter.sh` (15 tests)
 - **E2E relay**: `bash urc/core/test-e2e-relay.sh` (6 tests)
-- **Inbox hooks**: `bash urc/core/test-inbox-hooks.sh` (8 tests)
+- **Inbox hooks**: `bash urc/core/test-inbox-hooks.sh` (17 tests)
 - **Inbox watcher**: `bash urc/core/test-inbox-watcher.sh` (6 tests)
 - **Teams**: `.venv/bin/python3 urc/core/teams_server.py --self-test`
 - **Plugin validation**: `bash scripts/validate-plugin.sh` (23 checks)

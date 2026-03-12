@@ -324,9 +324,9 @@ if [[ $HAS_GEMINI -eq 1 ]]; then
         "matcher": "*",
         "hooks": [
           {
-            "name": "inbox-inject",
+            "name": "inbox-check",
             "type": "command",
-            "command": "bash __PROJECT_ROOT__/.gemini/hooks/inbox-inject.sh"
+            "command": "bash __PROJECT_ROOT__/hooks/scripts/inbox-check.sh"
           }
         ]
       }

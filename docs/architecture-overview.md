@@ -91,9 +91,8 @@ dormant (removed from `.mcp.json`). Preserved for future rebuild.
 
 ### 4b. Inbox Notification Architecture (active, 5-layer stack)
 
-1. **PostToolUse piggyback** (Claude): `.claude/hooks/inbox-piggyback.sh` — O(1) stat, uses `additionalContext`
+1. **Unified inbox check** (all CLIs): `hooks/scripts/inbox-check.sh` — O(1) signal stat, CLI-auto-detected output format (Claude: PostToolUse additionalContext, Gemini: BeforeAgent additionalContext, Codex: Stop hook block)
 2. **MCP middleware hints**: `_peek_inbox_hint()` in heartbeat, get_fleet_status, dispatch_to_pane, read_pane_output
-3. **BeforeAgent hook** (Gemini): `.gemini/hooks/inbox-inject.sh` — additionalContext injection with broadcast dedup
 4. **tmux wake nudge**: `send_message(notify=True)` sends text to idle pane (rate-limited: 30s cooldown per recipient)
 5. **Background inbox watcher**: `urc/core/inbox-watcher.sh` — agent arms via background task, blocks on `tmux wait-for`, completes when message arrives
 

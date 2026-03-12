@@ -121,6 +121,7 @@ tmux set-option -p -t "$RELAY_PANE" @bridge_target "$TARGET_PANE"
 tmux set-option -p -t "$RELAY_PANE" @bridge_cli "$CLI_TYPE"
 tmux set-option -p -t "$RELAY_PANE" @bridge_relays 0
 tmux set-option -p -t "$TARGET_PANE" @bridge_relay "$RELAY_PANE"
+tmux set-option -p -t "$TARGET_PANE" @urc_cli "$(echo "$CLI_TYPE" | tr '[:upper:]' '[:lower:]')" 2>/dev/null || true
 
 # Pre-register relay in coordination DB (so fleet sees it immediately)
 TARGET_NUM="${TARGET_PANE#%}"

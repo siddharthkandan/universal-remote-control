@@ -102,8 +102,8 @@ def _get_conn():
 def _ensure_registered():
     """Auto-register the calling pane on first use. No-op if not in tmux.
 
-    Uses INSERT OR IGNORE to avoid clobbering existing agent records.
-    CLI type auto-detected from TMUX pane options when available.
+    Checks get_agent() first — skips if already registered (never overwrites).
+    CLI type: @urc_cli tmux option > CLAUDE_PROJECT_DIR env var > "unknown".
     """
     global _auto_registered
     if _auto_registered:
@@ -119,8 +119,9 @@ def _ensure_registered():
         if existing:
             _auto_registered = True  # already registered -- don't overwrite
             return
-        # Detect CLI type from tmux pane option (set by bootstrap/session-start)
-        cli_type = "claude"
+        # Detect CLI type: tmux pane option > env var > "unknown"
+        # NEVER default to "claude" — causes false attribution for Gemini/Codex panes
+        cli_type = "unknown"
         try:
             cli_check = subprocess.run(
                 ["tmux", "display-message", "-t", pane_id, "-p", "#{@urc_cli}"],
@@ -130,6 +131,8 @@ def _ensure_registered():
                 cli_type = cli_check.stdout.strip()
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
+        if cli_type == "unknown" and os.environ.get("CLAUDE_PROJECT_DIR"):
+            cli_type = "claude"
         db_register_agent(conn, pane_id, cli_type, "mcp-server", os.getpid(), "")
         _auto_registered = True
     except Exception:
@@ -264,6 +267,7 @@ async def register_agent(
     cli: str,
     role: str = "worker",
     model: str = "",
+    source: str = "urc",
 ) -> dict:
     """Register this pane as an agent in the coordination DB."""
     err = _validate_pane_id(pane_id)
@@ -272,9 +276,9 @@ async def register_agent(
     try:
         from urc.core.db import register_agent as db_register_agent
         conn = _get_conn()
-        db_register_agent(conn, pane_id, cli, role, os.getpid(), model)
-        append_log("register", pane_id, {"cli": cli, "role": role, "model": model})
-        return {"status": "registered", "pane_id": pane_id, "cli": cli}
+        db_register_agent(conn, pane_id, cli, role, os.getpid(), model, source=source)
+        append_log("register", pane_id, {"cli": cli, "role": role, "model": model, "source": source})
+        return {"status": "registered", "pane_id": pane_id, "cli": cli, "source": source}
     except Exception as e:
         return {"error": str(e), "tool": "register_agent"}
 
@@ -320,8 +324,8 @@ async def heartbeat(
 
 
 @mcp.tool()
-async def get_fleet_status(stale_threshold: int = 3600) -> dict:
-    """List registered agents, filtered by heartbeat freshness. For fleet-wide discovery of existing panes only — not needed before spawning Agent Teams. Set stale_threshold=0 for all."""
+async def get_fleet_status(stale_threshold: int = 3600, source: str = "") -> dict:
+    """List registered agents, filtered by heartbeat freshness. For fleet-wide discovery of existing panes only — not needed before spawning Agent Teams. Set stale_threshold=0 for all. Set source to filter by registration source (e.g. 'urc', 'agent_teams')."""
     _ensure_registered()
     try:
         from urc.core.db import list_agents
@@ -344,6 +348,9 @@ async def get_fleet_status(stale_threshold: int = 3600) -> dict:
         agents = []
         for row in rows:
             r = dict(row)
+            # Source filter
+            if source and r.get("source", "urc") != source:
+                continue
             last_hb = r.get("last_heartbeat") or 0.0
             agents.append({
                 "pane_id": r.get("pane_id", ""),
@@ -355,6 +362,7 @@ async def get_fleet_status(stale_threshold: int = 3600) -> dict:
                 "model": r.get("model", ""),
                 "label": r.get("label", ""),
                 "alive": r.get("pane_id", "") in live_panes,
+                "source": r.get("source", "urc"),
             })
 
         result = {"agents": agents, "count": len(agents)}
@@ -403,6 +411,20 @@ async def dispatch_to_pane(pane_id: str, message: str) -> dict:
     err = _validate_pane_id(pane_id)
     if err:
         return {"error": err, "tool": "dispatch_to_pane"}
+
+    # Message length guard — tmux paste-buffer silently truncates at ~3000 chars
+    if len(message) > 3000:
+        return {
+            "status": "rejected",
+            "pane": pane_id,
+            "error": f"Message too long ({len(message)} chars). tmux paste-buffer silently truncates >3000. "
+                     f"Use file handoff + send_message reference for large content.",
+            "tool": "dispatch_to_pane",
+        }
+    warning = None
+    if len(message) > 1000:
+        warning = f"Message is {len(message)} chars. >1000 may be unreliable via tmux. Consider file handoff."
+
     _ensure_registered()
     try:
         # Session-group guard
@@ -441,6 +463,10 @@ async def dispatch_to_pane(pane_id: str, message: str) -> dict:
         status = result.get("status", "")
         if status == "delivered":
             append_log("dispatch_to_pane", pane_id, {"message": message[:200]})
+
+        # Add length warning if applicable
+        if warning:
+            result["warning"] = warning
 
         # Add inbox hint
         hint = _peek_inbox_hint()
@@ -826,7 +852,7 @@ async def bootstrap_validate() -> dict:
         pass
 
     if live_panes:
-        for dirname in ["responses", "signals", "timeout", "reply_to", "streams", "inbox", "dispatches", "circuits", "pids", "pushes"]:
+        for dirname in ["responses", "signals", "timeout", "reply_to", "streams", "inbox", "dispatches", "circuits", "pids", "pushes", "pushes/overflow"]:
             dirpath = _URC_DIR / dirname
             if not dirpath.is_dir():
                 continue
@@ -1017,6 +1043,11 @@ def _run_self_test():
         check("dispatch_to_pane returns dict", isinstance(r, dict), str(r))
         check("dispatch_to_pane has status", "status" in r or "error" in r, str(r))
 
+        # dispatch_to_pane length guard
+        r = await dispatch_to_pane(pane_id="%99996", message="x" * 3001)
+        check("dispatch_to_pane rejects >3000", r.get("status") == "rejected", str(r))
+        check("dispatch_to_pane error mentions length", "3000" in r.get("error", ""), str(r))
+
         # -- Tool 6: read_pane_output (tmux-dependent, test graceful failure) --
         r = await read_pane_output(pane_id="%99996", lines=5)
         check("read_pane_output returns dict", isinstance(r, dict), str(r))
@@ -1059,6 +1090,15 @@ def _run_self_test():
         r = await cancel_dispatch(pane_id="%99996")
         check("cancel_dispatch returns dict", isinstance(r, dict), str(r))
 
+        # -- Source tagging --
+        await register_agent(pane_id="%99996", cli="claude", source="agent_teams")
+        r = await get_fleet_status(stale_threshold=0, source="urc")
+        urc_panes = {a["pane_id"] for a in r["agents"]}
+        check("fleet source filter excludes agent_teams", "%99996" not in urc_panes, str(urc_panes))
+        r_all = await get_fleet_status(stale_threshold=0)
+        all_panes = {a["pane_id"] for a in r_all["agents"]}
+        check("fleet no-filter includes all", "%99996" in all_panes, str(all_panes))
+
         # -- Tool 11: bootstrap_validate --
         r = await bootstrap_validate()
         check("bootstrap_validate returns dict", isinstance(r, dict), str(r))
@@ -1100,4 +1140,11 @@ if __name__ == "__main__":
         sys.exit(1)
     else:
         _get_conn()
-        mcp.run(transport="stdio")
+        # Write per-pane PID file for MCP health monitoring (Gemini has no auto-reconnect)
+        # Per-pane because stdio MCP spawns one server.py per client pane
+        pids_dir = _URC_DIR / "pids"
+        pids_dir.mkdir(parents=True, exist_ok=True)
+        pane_id = os.environ.get("TMUX_PANE", "unknown")
+        pid_file = pids_dir / f"server_{pane_id}.pid"
+        pid_file.write_text(str(os.getpid()))
+        mcp.run(transport="stdio")  # BLOCKING — nothing after this runs

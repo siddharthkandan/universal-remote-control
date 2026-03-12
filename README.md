@@ -42,7 +42,7 @@ Behind the scenes, URC spawns a lightweight Haiku relay that acts as a pure pass
 - 5-layer inbox notification stack ensures no message is missed
 
 **Tested and validated**
-- 147 assertions across 10 test suites
+- 160 assertions across 10 test suites
 - 23-check plugin validation
 - Post-Enter stuck-input detection for TUI reliability
 
@@ -148,7 +148,7 @@ urc/
 │   ├── inbox-watcher.sh          Background inbox notification
 │   ├── circuit.sh                Circuit breaker for dispatch failures
 │   ├── relay-ctl.sh              $0 relay configuration
-│   └── test-*.sh                 8 test suites (85 assertions)
+│   └── test-*.sh                 8 test suites (94 assertions)
 ├── lib/
 │   └── state-write.sh            Atomic JSON write helper
 └── schemas/

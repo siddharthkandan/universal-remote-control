@@ -20,7 +20,12 @@ detect_cli() {
   # Validate pane ID format before using in SQL
   [[ "$pane" =~ ^%[0-9]+$ ]] || { echo "shell"; return; }
 
-  # Strategy 1: DB lookup (fast path)
+  # Strategy 0: tmux pane option (set by auto-register.sh / urc-spawn.sh, ~5ms)
+  local opt_cli
+  opt_cli=$(tmux show-options -t "$pane" -pqv @urc_cli 2>/dev/null)
+  if [ -n "$opt_cli" ]; then echo "$opt_cli"; return 0; fi
+
+  # Strategy 1: DB lookup (~50ms)
   if [ -f "$_CLI_ADAPTER_DB" ]; then
     local db_cli
     db_cli=$(sqlite3 "$_CLI_ADAPTER_DB" \

@@ -17,12 +17,21 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/inbox-piggyback.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/hooks/scripts/inbox-check.sh"
           }
         ]
       }
     ],
     "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/hooks/scripts/auto-register.sh"
+          }
+        ]
+      },
       {
         "matcher": "",
         "hooks": [
@@ -38,6 +47,17 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-start.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/hooks/scripts/auto-deregister.sh"
           }
         ]
       }
